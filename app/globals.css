@@ -1,0 +1,112 @@
+:root {
+  color-scheme: dark;
+  --bg: #07090d;
+  --panel: #0d1118;
+  --line: #202734;
+  --muted: #7d8798;
+  --text: #f4f7fb;
+  --soft: #c9d0db;
+  --good: #7ef0b8;
+  --warn: #f2d27b;
+  --bad: #f48f8f;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+
+.shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 36px 0 48px; }
+.topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+.eyebrow, .label { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+h1 { margin: 7px 0 0; font-size: clamp(38px, 7vw, 72px); line-height: .9; letter-spacing: -.055em; }
+h2 { margin: 5px 0 0; font-size: 23px; letter-spacing: -.025em; }
+
+.panel { background: linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,0)), var(--panel); border: 1px solid var(--line); border-radius: 18px; }
+.demoNotice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 22px; align-items: start; margin-bottom: 16px; padding: 22px 24px; border-color: rgba(242,210,123,.35); }
+.demoNoticeStatus { display: inline-flex; align-items: center; gap: 9px; min-height: 34px; color: var(--warn); font-size: 11px; font-weight: 800; letter-spacing: .08em; white-space: nowrap; }
+.demoNoticeStatus .dot { background: var(--warn); box-shadow: 0 0 16px rgba(242,210,123,.5); }
+.demoNotice h2 { margin-top: 6px; }
+.demoNotice p { max-width: 760px; margin: 10px 0 0; color: var(--soft); font-size: 14px; line-height: 1.65; }
+.hero { padding: 28px; }
+.heroTitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); }
+.heroTitle strong { color: var(--soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 42px 0 38px; }
+.metric { min-width: 0; }
+.metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 7px; }
+.metric strong { display: block; font-size: clamp(54px, 9vw, 100px); letter-spacing: -.065em; line-height: .92; font-variant-numeric: tabular-nums; }
+.metric small { font-size: .22em; letter-spacing: 0; color: var(--muted); font-weight: 600; }
+.metaGrid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); padding-top: 22px; gap: 22px; }
+.metaGrid span { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 7px; }
+.metaGrid strong { font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.status { display: inline-flex; align-items: center; gap: 9px; border: 1px solid var(--line); padding: 9px 12px; border-radius: 999px; font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.status-live .dot { background: var(--good); box-shadow: 0 0 16px var(--good); }
+.status-stale .dot, .status-connecting .dot { background: var(--warn); }
+.status-offline .dot, .status-no-signal .dot { background: var(--bad); }
+
+.connectionPanel { margin-top: 16px; padding: 20px 22px; display: grid; gap: 17px; }
+.connectionPanel > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; align-items: baseline; }
+.connectionPanel strong, code { color: var(--soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+
+.primaryButton { min-height: 44px; border: 1px solid var(--good); border-radius: 10px; padding: 0 18px; background: rgba(126,240,184,.1); color: var(--good); font-weight: 800; letter-spacing: .04em; cursor: pointer; }
+.primaryButton:disabled { border-color: var(--line); background: transparent; color: var(--muted); cursor: not-allowed; }
+
+.localSensorPanel { padding: 24px; }
+.localSensorEndpoint { display: grid; gap: 7px; margin-top: 22px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: rgba(0,0,0,.14); }
+.localSensorEndpoint > span { color: var(--muted); font-size: 12px; }
+.localSensorEndpoint code { font-size: 13px; }
+.localSensorActions { display: flex; align-items: center; gap: 15px; margin-top: 16px; }
+.localSensorActions > span { color: var(--muted); font-size: 12px; }
+.localSensorResult { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
+.localSensorMetrics { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.localSensorMetrics > div > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+.localSensorMetrics strong { display: block; font-size: clamp(38px, 7vw, 72px); line-height: 1; letter-spacing: -.055em; font-variant-numeric: tabular-nums; }
+.localSensorMetrics small { color: var(--muted); font-size: .28em; letter-spacing: 0; }
+.localSensorOnline { display: inline-flex; align-items: center; gap: 9px; margin-top: 20px; color: var(--good); font-size: 12px; font-weight: 800; letter-spacing: .08em; }
+.localSensorOnline .dot { background: var(--good); box-shadow: 0 0 16px var(--good); }
+.localSensorDetails { display: grid; gap: 14px; margin-top: 18px; }
+.localSensorDetails > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; align-items: baseline; }
+
+.gatewayPanel { margin-top: 16px; padding: 24px; }
+.gatewayPanel + .hero { margin-top: 16px; }
+.gatewayActions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+.toggleButton, .secondaryActionButton { min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 0 18px; background: transparent; color: var(--soft); font-weight: 800; letter-spacing: .04em; cursor: pointer; }
+.toggleButtonOn { border-color: var(--good); background: rgba(126,240,184,.1); color: var(--good); }
+.secondaryActionButton { border-color: rgba(201,208,219,.35); }
+.toggleButton:disabled, .secondaryActionButton:disabled { border-color: var(--line); background: transparent; color: var(--muted); cursor: not-allowed; }
+.gatewayGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 22px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--line); }
+.gatewayGrid > div { min-width: 0; padding: 16px; background: var(--panel); }
+.gatewayGrid span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.gatewayGrid strong { display: block; color: var(--soft); font: 700 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.gatewayResult { grid-column: span 3; }
+
+.eventPanel { margin-top: 16px; padding: 22px; }
+.sectionHeading { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
+.sectionHeading > span { color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.empty { min-height: 190px; display: grid; place-content: center; text-align: center; gap: 8px; color: var(--muted); }
+.empty strong { color: var(--soft); }
+.tableWrap { overflow-x: auto; margin-top: 18px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { color: var(--muted); text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+td { padding: 13px 12px; border-bottom: 1px solid rgba(32,39,52,.65); white-space: nowrap; font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: 0; }
+footer { color: var(--muted); text-align: center; font-size: 12px; margin-top: 18px; }
+
+@media (max-width: 760px) {
+  .shell { width: min(100% - 20px, 1120px); padding-top: 22px; }
+  .topbar { align-items: center; }
+  .demoNotice { grid-template-columns: 1fr; gap: 10px; padding: 18px; }
+  .metrics { grid-template-columns: 1fr; padding: 32px 0; }
+  .metric strong { font-size: clamp(58px, 20vw, 92px); }
+  .metaGrid { grid-template-columns: 1fr 1fr; }
+  .connectionPanel { display: none; }
+  .hero, .eventPanel, .localSensorPanel, .gatewayPanel { padding: 18px; }
+  .localSensorActions { align-items: stretch; flex-direction: column; }
+  .gatewayActions { display: grid; grid-template-columns: 1fr; }
+  .gatewayGrid { grid-template-columns: 1fr 1fr; }
+  .gatewayResult { grid-column: span 2; }
+  .localSensorMetrics { grid-template-columns: 1fr; }
+  .localSensorDetails > div { grid-template-columns: 1fr; gap: 5px; }
+}

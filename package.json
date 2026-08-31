@@ -1,0 +1,34 @@
+{
+  "name": "industrial-sensor",
+  "version": "0.10.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "account:create": "node scripts/create-account.mjs",
+    "build": "next build",
+    "typecheck": "tsc --noEmit --incremental false",
+    "login:devnet": "pad login",
+    "whoami:devnet": "pad whoami",
+    "check:devnet": "node scripts/devnet.mjs --check",
+    "predeploy:devnet": "npm run build",
+    "deploy:devnet": "node scripts/devnet.mjs",
+    "deploy:devnet:secure": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-with-mnemonic.ps1"
+  },
+  "dependencies": {
+    "@parity/product-sdk-host": "^0.16.0",
+    "@parity/product-sdk-statement-store": "^0.6.5",
+    "@polkadot/util-crypto": "13.5.9",
+    "next": "16.3.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.9.3"
+  }
+}
