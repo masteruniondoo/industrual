@@ -10,15 +10,15 @@ import type { TxStatus } from "@parity/product-sdk-tx";
 import { ACTUATOR_ABI } from "./abi";
 import {
   ACTUATOR_CONTRACT_ADDRESS,
-  ACTUATOR_FEE_BUFFER_NATIVE,
   ACTUATOR_PRICE_EVM,
   ACTUATOR_PRICE_NATIVE,
 } from "./config";
-import { assertSufficientBalance } from "./balance";
+import { preflightFailureError } from "./preflight";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
 const DOT_NS_IDENTIFIER = "industrial.dot";
 const READ_TIMEOUT_MS = 60_000;
+const MAPPING_TIMEOUT_MS = 90_000;
 const submissionLock = new ActuatorSubmissionLock();
 
 type ActuatorContext = Awaited<ReturnType<typeof createContext>>;
@@ -93,22 +93,25 @@ function asActivationError(error: unknown): unknown {
   return error;
 }
 
+/**
+ * Dry-runs the paid call before the wallet is touched. The dry run executes
+ * the same `ReviveApi.call` the transaction would, so an account that cannot
+ * pay fails here with `TransferFailed` instead of after the user has signed.
+ */
 async function assertActivationAffordable(
-  api: Awaited<ReturnType<typeof createContext>>["api"],
+  contract: Awaited<ReturnType<typeof createContext>>["contract"],
   address: string,
 ) {
-  const account = await withTimeout(
-    api.query.System.Account.getValue(address),
+  const dryRun = await withTimeout(
+    contract.trigger.query({
+      origin: address,
+      value: ACTUATOR_PRICE_NATIVE,
+      at: "finalized",
+    }),
     READ_TIMEOUT_MS,
-    "account balance read",
+    "activation pre-flight",
   );
-  const existentialDeposit = await api.constants.Balances.ExistentialDeposit();
-  assertSufficientBalance(
-    { free: account.data.free, frozen: account.data.frozen },
-    ACTUATOR_PRICE_NATIVE,
-    ACTUATOR_FEE_BUFFER_NATIVE,
-    existentialDeposit,
-  );
+  if (!dryRun.success) throw preflightFailureError(dryRun.value);
 }
 
 async function createContext() {
@@ -124,9 +127,7 @@ async function createContext() {
     signerManager,
   });
 
-  const api = chain.raw.assetHub.getTypedApi(paseo_asset_hub);
-
-  return { api, chain, contract, runtime, signerManager };
+  return { chain, contract, runtime, signerManager };
 }
 
 async function getContext() {
@@ -164,7 +165,7 @@ export async function triggerActuator(
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
     onStatus?.("connecting");
-    const { api, contract, runtime, signerManager } = await getContext();
+    const { contract, runtime, signerManager } = await getContext();
 
     const connected = await signerManager.connect("host");
     if (!connected.ok) throw connected.error;
@@ -177,13 +178,13 @@ export async function triggerActuator(
     // Checked before anything is signed: the chain would otherwise reject the
     // call with Revive.TransferFailed only after the user has approved it.
     onStatus?.("checking-balance");
-    await assertActivationAffordable(api, productAccount.value.address);
+    await assertActivationAffordable(contract, productAccount.value.address);
 
     onStatus?.("mapping");
-    const mapping = await ensureContractAccountMapped(
-      runtime,
-      productAccount.value.address,
-      signer,
+    const mapping = await withTimeout(
+      ensureContractAccountMapped(runtime, productAccount.value.address, signer),
+      MAPPING_TIMEOUT_MS,
+      "account mapping",
     );
     if (!mapping.ok) throw mapping.error;
 

@@ -24,13 +24,6 @@ export const ACTUATOR_PRICE_NATIVE = evmValueToNative(
 );
 
 /**
- * Head-room kept aside for the extrinsic fee and the contract's storage
- * deposit when checking whether an account can afford an activation.
- * 0.2 PAS is far above the observed cost of a `trigger()` call.
- */
-export const ACTUATOR_FEE_BUFFER_NATIVE = 2_000_000_000n;
-
-/**
  * Converts a Solidity-side value (18 decimals) into the native chain balance
  * the extrinsic must carry.
  */

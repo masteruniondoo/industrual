@@ -64,14 +64,20 @@ Confirmed with `ReviveApi.call` dry runs against the deployed contract:
 
 ### Funds check before signing
 
-The activation aborts before any signature is requested when the account
-cannot cover it. `lib/actuator/balance.ts` compares the spendable balance
-(`free - frozen`) against `1 PAS + 0.2 PAS head-room + existential deposit`,
-read from `Balances.ExistentialDeposit`, and throws
-`ActuatorInsufficientFundsError` with both amounts. Without it the chain
-rejects the call with `Revive.TransferFailed` only after the user has
-already approved the transaction; that dispatch error is also translated
-into a readable message if it still happens.
+The activation aborts before the wallet is touched when the account cannot
+cover it. The check is a dry run of the paid call itself —
+`contract.trigger.query({ origin, value })` — which executes the same
+`ReviveApi.call` the transaction would, against the caller's real balance,
+without a signature. `lib/actuator/preflight.ts` classifies the failure:
+`Revive.TransferFailed` becomes `ActuatorInsufficientFundsError`, a contract
+revert keeps its reason, anything else stays readable.
+
+An earlier version read `System.Account` directly instead. That storage read
+hangs inside the Product host, so the check timed out rather than answering;
+the dry-run path is the one the SDK itself uses for `readPrice()` and works.
+The same `TransferFailed` translation is applied to dispatch errors, and the
+account-mapping step is bounded by its own timeout, so no step can spin
+forever.
 
 ### Why the deployment skips the CDM registry
 
