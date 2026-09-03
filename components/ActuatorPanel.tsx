@@ -28,6 +28,7 @@ type ActivationPhase =
   | "loading"
   | "ready"
   | "requested"
+  | "checking"
   | "preparing"
   | "confirming"
   | "confirmed"
@@ -90,6 +91,10 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
       setPhase("requested");
       return;
     }
+    if (status === "checking-balance") {
+      setPhase("checking");
+      return;
+    }
     if (status === "mapping") {
       setPhase("preparing");
       return;
@@ -116,7 +121,10 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   }
 
   const pending =
-    phase === "requested" || phase === "preparing" || phase === "confirming";
+    phase === "requested" ||
+    phase === "checking" ||
+    phase === "preparing" ||
+    phase === "confirming";
   const stateClass = deviceState === "ON" ? "actuatorOn" : "actuatorOff";
 
   return (
@@ -175,6 +183,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
 
         <div className="actuatorResult" aria-live="polite">
           {phase === "requested" ? <><strong>ACTIVATION REQUESTED</strong><span>Waiting for signature...</span></> : null}
+          {phase === "checking" ? <><strong>CHECKING BALANCE</strong><span>Confirming the account can cover 1 PAS plus fees.</span></> : null}
           {phase === "preparing" ? <><strong>PREPARING ACCOUNT</strong><span>Approve the one-time account mapping in your wallet.</span></> : null}
           {phase === "confirming" ? <><strong>CONFIRMING ON-CHAIN TRIGGER...</strong><span>Waiting for finalized transaction.</span></> : null}
           {phase === "confirmed" && confirmedNonce !== null ? <><strong>PAYMENT CONFIRMED</strong><span>Activation #{confirmedNonce.toString()}</span><span>On-chain trigger ready for actuator.</span></> : null}

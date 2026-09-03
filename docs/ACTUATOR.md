@@ -62,6 +62,17 @@ Confirmed with `ReviveApi.call` dry runs against the deployed contract:
 | `10000000000` | succeeds |
 | `100000000` / `0` | contract reverts, `exactly 1 PAS required` |
 
+### Funds check before signing
+
+The activation aborts before any signature is requested when the account
+cannot cover it. `lib/actuator/balance.ts` compares the spendable balance
+(`free - frozen`) against `1 PAS + 0.2 PAS head-room + existential deposit`,
+read from `Balances.ExistentialDeposit`, and throws
+`ActuatorInsufficientFundsError` with both amounts. Without it the chain
+rejects the call with `Revive.TransferFailed` only after the user has
+already approved the transaction; that dispatch error is also translated
+into a readable message if it still happens.
+
 ### Why the deployment skips the CDM registry
 
 `cdm deploy -n devnet` submits `Revive.instantiate_with_code` and

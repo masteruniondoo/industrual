@@ -10,9 +10,11 @@ import type { TxStatus } from "@parity/product-sdk-tx";
 import { ACTUATOR_ABI } from "./abi";
 import {
   ACTUATOR_CONTRACT_ADDRESS,
+  ACTUATOR_FEE_BUFFER_NATIVE,
   ACTUATOR_PRICE_EVM,
   ACTUATOR_PRICE_NATIVE,
 } from "./config";
+import { assertSufficientBalance } from "./balance";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
 const DOT_NS_IDENTIFIER = "industrial.dot";
@@ -24,6 +26,7 @@ let contextPromise: Promise<ActuatorContext> | null = null;
 
 export type ActuatorTransactionStatus =
   | "connecting"
+  | "checking-balance"
   | "mapping"
   | "signing"
   | "broadcasting"
@@ -80,6 +83,34 @@ function sdkErrorMessage(error: unknown): string {
   }
 }
 
+function asActivationError(error: unknown): unknown {
+  if (sdkErrorMessage(error).includes("TransferFailed")) {
+    return new Error(
+      "The chain rejected the payment: the account could not transfer 1 PAS. " +
+        "Check the balance and try again.",
+    );
+  }
+  return error;
+}
+
+async function assertActivationAffordable(
+  api: Awaited<ReturnType<typeof createContext>>["api"],
+  address: string,
+) {
+  const account = await withTimeout(
+    api.query.System.Account.getValue(address),
+    READ_TIMEOUT_MS,
+    "account balance read",
+  );
+  const existentialDeposit = await api.constants.Balances.ExistentialDeposit();
+  assertSufficientBalance(
+    { free: account.data.free, frozen: account.data.frozen },
+    ACTUATOR_PRICE_NATIVE,
+    ACTUATOR_FEE_BUFFER_NATIVE,
+    existentialDeposit,
+  );
+}
+
 async function createContext() {
   const address = requireContractAddress();
   const chain = await getChainAPI("devnet");
@@ -93,7 +124,9 @@ async function createContext() {
     signerManager,
   });
 
-  return { chain, contract, runtime, signerManager };
+  const api = chain.raw.assetHub.getTypedApi(paseo_asset_hub);
+
+  return { api, chain, contract, runtime, signerManager };
 }
 
 async function getContext() {
@@ -131,7 +164,7 @@ export async function triggerActuator(
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
     onStatus?.("connecting");
-    const { contract, runtime, signerManager } = await getContext();
+    const { api, contract, runtime, signerManager } = await getContext();
 
     const connected = await signerManager.connect("host");
     if (!connected.ok) throw connected.error;
@@ -140,6 +173,12 @@ export async function triggerActuator(
     if (!productAccount.ok) throw productAccount.error;
 
     const signer = productAccount.value.getSigner();
+
+    // Checked before anything is signed: the chain would otherwise reject the
+    // call with Revive.TransferFailed only after the user has approved it.
+    onStatus?.("checking-balance");
+    await assertActivationAffordable(api, productAccount.value.address);
+
     onStatus?.("mapping");
     const mapping = await ensureContractAccountMapped(
       runtime,
@@ -160,7 +199,7 @@ export async function triggerActuator(
       waitFor: "finalized",
       onStatus: (status: TxStatus) => onStatus?.(status),
     });
-    if (!result.ok) throw result.error;
+    if (!result.ok) throw asActivationError(result.error);
 
     onStatus?.("finalized");
     const triggerNonce = await withTimeout(
