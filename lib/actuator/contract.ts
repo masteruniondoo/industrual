@@ -10,11 +10,13 @@ import type { TxStatus } from "@parity/product-sdk-tx";
 import { ACTUATOR_ABI } from "./abi";
 import {
   ACTUATOR_CONTRACT_ADDRESS,
-  ACTUATOR_PRICE_PLANCK,
+  ACTUATOR_PRICE_EVM,
+  ACTUATOR_PRICE_NATIVE,
 } from "./config";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
 const DOT_NS_IDENTIFIER = "industrial.dot";
+const READ_TIMEOUT_MS = 60_000;
 const submissionLock = new ActuatorSubmissionLock();
 
 type ActuatorContext = Awaited<ReturnType<typeof createContext>>;
@@ -33,6 +35,25 @@ export type TriggerActuatorResult = {
   triggerNonce: bigint;
   transactionHash: string;
 };
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out after ${ms / 1000}s waiting for the ${label}.`)),
+      ms,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 function requireContractAddress(): `0x${string}` {
   if (!ACTUATOR_CONTRACT_ADDRESS) {
@@ -127,22 +148,26 @@ export async function triggerActuator(
     );
     if (!mapping.ok) throw mapping.error;
 
-    const configuredPrice = await readPrice();
-    if (configuredPrice !== ACTUATOR_PRICE_PLANCK) {
+    const configuredPrice = await withTimeout(readPrice(), READ_TIMEOUT_MS, "contract price read");
+    if (configuredPrice !== ACTUATOR_PRICE_EVM) {
       throw new Error(`Unexpected contract price: ${configuredPrice.toString()}.`);
     }
 
     const result = await contract.trigger.tx({
       origin: productAccount.value.address,
       signer,
-      value: ACTUATOR_PRICE_PLANCK,
+      value: ACTUATOR_PRICE_NATIVE,
       waitFor: "finalized",
       onStatus: (status: TxStatus) => onStatus?.(status),
     });
     if (!result.ok) throw result.error;
 
     onStatus?.("finalized");
-    const triggerNonce = await readTriggerNonce();
+    const triggerNonce = await withTimeout(
+      readTriggerNonce(),
+      READ_TIMEOUT_MS,
+      "triggerNonce refresh",
+    );
     return {
       triggerNonce,
       transactionHash: result.value.txHash,

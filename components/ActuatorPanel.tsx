@@ -14,7 +14,7 @@ import {
   ACTUATOR_NETWORK,
   ACTUATOR_PACKAGE_NAME,
   ACTUATOR_PRICE_LABEL,
-  ACTUATOR_PRICE_PLANCK,
+  ACTUATOR_PRICE_EVM,
   ACTUATOR_RUN_SECONDS,
 } from "../lib/actuator/config";
 
@@ -28,6 +28,7 @@ type ActivationPhase =
   | "loading"
   | "ready"
   | "requested"
+  | "preparing"
   | "confirming"
   | "confirmed"
   | "error";
@@ -53,7 +54,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   const refreshChainState = useCallback(async () => {
     if (!configured) return;
     const [nonce, price] = await Promise.all([readTriggerNonce(), readPrice()]);
-    if (price !== ACTUATOR_PRICE_PLANCK) {
+    if (price !== ACTUATOR_PRICE_EVM) {
       throw new Error(`Unexpected contract price: ${price.toString()}.`);
     }
     setChainNonce(nonce);
@@ -89,11 +90,15 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
       setPhase("requested");
       return;
     }
+    if (status === "mapping") {
+      setPhase("preparing");
+      return;
+    }
     if (status !== "finalized") setPhase("confirming");
   }
 
   async function activate() {
-    if (!configured || phase === "requested" || phase === "confirming") return;
+    if (!configured || pending) return;
 
     setError(null);
     setConfirmedNonce(null);
@@ -110,7 +115,8 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
     }
   }
 
-  const pending = phase === "requested" || phase === "confirming";
+  const pending =
+    phase === "requested" || phase === "preparing" || phase === "confirming";
   const stateClass = deviceState === "ON" ? "actuatorOn" : "actuatorOff";
 
   return (
@@ -169,6 +175,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
 
         <div className="actuatorResult" aria-live="polite">
           {phase === "requested" ? <><strong>ACTIVATION REQUESTED</strong><span>Waiting for signature...</span></> : null}
+          {phase === "preparing" ? <><strong>PREPARING ACCOUNT</strong><span>Approve the one-time account mapping in your wallet.</span></> : null}
           {phase === "confirming" ? <><strong>CONFIRMING ON-CHAIN TRIGGER...</strong><span>Waiting for finalized transaction.</span></> : null}
           {phase === "confirmed" && confirmedNonce !== null ? <><strong>PAYMENT CONFIRMED</strong><span>Activation #{confirmedNonce.toString()}</span><span>On-chain trigger ready for actuator.</span></> : null}
           {phase === "unconfigured" ? <><strong>DEPLOYMENT REQUIRED</strong><span>Contract package {ACTUATOR_PACKAGE_NAME} has no configured address.</span></> : null}

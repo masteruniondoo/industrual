@@ -1,0 +1,40 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "contracts/Actuator.sol": {
+      "content": "// SPDX-License-Identifier: Apache-2.0\npragma solidity ^0.8.28;\n\n/// @title Warehouse actuator payment trigger\n/// @notice Records an on-chain activation trigger after receiving exactly 1 PAS.\n/// @dev This contract does not control hardware or report physical actuator state.\n/// @custom:cdm @industrial/actuator\ncontract Actuator {\n    uint256 public triggerNonce;\n    uint256 public constant PRICE = 1 ether;\n    uint256 public constant ACTIVATION_SECONDS = 60;\n\n    event Activated(\n        address indexed payer,\n        uint256 indexed nonce,\n        uint256 value,\n        uint256 timestamp\n    );\n\n    function trigger() external payable {\n        require(msg.value == PRICE, \"exactly 1 PAS required\");\n\n        triggerNonce += 1;\n\n        emit Activated(\n            msg.sender,\n            triggerNonce,\n            msg.value,\n            block.timestamp\n        );\n    }\n}\n"
+    }
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "evmVersion": "paris",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "metadata",
+          "evm.bytecode",
+          "evm.deployedBytecode",
+          "evm.methodIdentifiers",
+          "storageLayout"
+        ],
+        "": [
+          "ast"
+        ]
+      }
+    },
+    "resolc": {
+      "version": "0.6.0",
+      "compilerSource": "binary",
+      "settings": {
+        "optimizer": {
+          "enabled": true,
+          "runs": 200
+        }
+      }
+    }
+  }
+}

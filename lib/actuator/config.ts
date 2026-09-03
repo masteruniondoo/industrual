@@ -1,8 +1,44 @@
 export const ACTUATOR_PACKAGE_NAME = "@industrial/actuator";
-export const ACTUATOR_PRICE_PLANCK = 1_000_000_000_000_000_000n;
 export const ACTUATOR_PRICE_LABEL = "1 PAS";
 export const ACTUATOR_RUN_SECONDS = 60;
 export const ACTUATOR_NETWORK = "Products Devnet / Asset Hub";
+
+/**
+ * `Actuator.PRICE` as Solidity sees it. pallet-revive scales the native balance
+ * up to 18 decimals before exposing it as `msg.value`, so the contract constant
+ * is 1e18 for one PAS.
+ */
+export const ACTUATOR_PRICE_EVM = 1_000_000_000_000_000_000n;
+
+/** PAS has 10 decimals on Asset Hub. */
+export const ACTUATOR_NATIVE_DECIMALS = 10;
+
+/**
+ * The value carried by the `Revive.call` extrinsic, in native planck. This is
+ * NOT the same number as the contract's PRICE: sending 1e18 planck would ask
+ * the chain to transfer 100,000,000 PAS and fails with `Revive.TransferFailed`.
+ */
+export const ACTUATOR_PRICE_NATIVE = evmValueToNative(
+  ACTUATOR_PRICE_EVM,
+  ACTUATOR_NATIVE_DECIMALS,
+);
+
+/**
+ * Converts a Solidity-side value (18 decimals) into the native chain balance
+ * the extrinsic must carry.
+ */
+export function evmValueToNative(evmValue: bigint, decimals: number): bigint {
+  if (decimals < 0 || decimals > 18) {
+    throw new Error(`Unsupported native decimals: ${decimals}.`);
+  }
+  const scale = 10n ** BigInt(18 - decimals);
+  if (evmValue % scale !== 0n) {
+    throw new Error(
+      `Value ${evmValue.toString()} is not representable with ${decimals} native decimals.`,
+    );
+  }
+  return evmValue / scale;
+}
 
 /**
  * Deployed on Products Devnet (Paseo Asset Hub, para ID 1000) on 2026-09-03,

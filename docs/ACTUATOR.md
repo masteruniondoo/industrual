@@ -36,11 +36,31 @@ a timer, or report that the fan is running.
 | Block | `#13024785` (`0x89bbc9ee6d605db1c13828ed015bacd4255e07a0fdf5a9776abfb383d2be72cf`) |
 | Deployer | `5Ckonvibt6UtXAoGb5jQycH96xUscfMGzTcuYAJxou48pAN2` / `0x4059d63174aac199416578a73123e98d477e632c` |
 | State after deployment | `triggerNonce = 0`, `PRICE = 1000000000000000000`, `ACTIVATION_SECONDS = 60` |
+| Code hash | `0x972f3dc150266a15d875e83ae48e59c77b25b0583277e3f976006a81f0617690` |
+| Code | 3662 bytes of PolkaVM, sha256 `e7d456c03f0a58ea889d76f403d99246d1994bd8e2ea4757a5f986be802d1e76` |
 | CDM registry entry | none — see below |
 
 The address lives in one place, `lib/actuator/config.ts`, and can be overridden
 with `NEXT_PUBLIC_ACTUATOR_CONTRACT_ADDRESS`. Without a valid address the
 frontend keeps the activation button disabled.
+
+### Payment units
+
+`Actuator.PRICE` is `1e18` because pallet-revive scales the native balance up
+to 18 decimals before a contract sees it as `msg.value`. The `Revive.call`
+extrinsic, however, carries **native planck**, and PAS has 10 decimals — so the
+frontend must send `10_000_000_000`, not `1e18`. The two numbers live side by
+side in `lib/actuator/config.ts` as `ACTUATOR_PRICE_EVM` and
+`ACTUATOR_PRICE_NATIVE`, and `evmValueToNative()` derives the second from the
+first.
+
+Confirmed with `ReviveApi.call` dry runs against the deployed contract:
+
+| extrinsic value | result |
+|---|---|
+| `1000000000000000000` | `Revive.TransferFailed` — asks the chain to move 100,000,000 PAS |
+| `10000000000` | succeeds |
+| `100000000` / `0` | contract reverts, `exactly 1 PAS required` |
 
 ### Why the deployment skips the CDM registry
 
