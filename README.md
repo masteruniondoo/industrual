@@ -15,7 +15,7 @@ Industrial.dot is an IoT demonstration of real-time sensor-message delivery thro
    The response format is:
 
    ```text
-   T=23.0,H=48.0
+   T=23.0,H=48.0,N=18,S=OFF
    ```
 
 3. **Desktop gateway** — A desktop computer on the same Wi-Fi network runs `industrial.dot` inside the Polkadot Products host. It fetches the ESP32 endpoint every 10 seconds, parses the response, and validates both values. This implementation is in [components/LocalSensorTest.tsx](components/LocalSensorTest.tsx).
@@ -42,7 +42,10 @@ Industrial.dot is an IoT demonstration of real-time sensor-message delivery thro
    Desktop / Android / iPhone
    ```
 
-The readings are temporary Celerity messages and are not currently stored in a database, smart contract, or Bulletin. Statement Store authenticates the Products host publisher; ESP32 device signing is not included.
+The readings are temporary Celerity messages and are not stored in a database,
+smart contract, or Bulletin. The separate Actuator contract stores only paid
+activation nonces. Statement Store authenticates the Products host publisher;
+ESP32 device signing is not included.
 
 ## What it listens to
 
@@ -57,9 +60,41 @@ Expected payload:
   "sensor": "WAREHOUSE-01",
   "temperature": 18.7,
   "humidity": 67.2,
+  "actuatorNonce": 18,
+  "actuatorState": "OFF",
   "timestamp": 1787503500000
 }
 ```
+
+During the ESP32 firmware transition, the original `T=23.0,H=48.0` response
+and Celerity messages without actuator fields remain supported. Missing
+physical actuator data is displayed as unknown and is never inferred from the
+contract.
+
+## Actuator
+
+The additive actuator demo introduces the CDM package
+`@industrial/actuator`. Paying exactly 1 PAS increments the contract's
+`triggerNonce`; this confirms an on-chain trigger, not physical fan operation.
+Only ESP32 telemetry fields `actuatorNonce` and `actuatorState` (`ON` or `OFF`)
+are treated as evidence of the physical device state.
+
+The contract is deployed on Products Devnet (Paseo Asset Hub, para ID 1000) at
+`0x0863b94ecffca8bca83306cda06b07a9dfef3374`, transaction
+`0xafb111f3ffc868b8869e828a93c229e2e46a8b9c589212c9e683d15396a41525` in block
+#13024785. The address is configured in one place, `lib/actuator/config.ts`,
+and can be pointed at another deployment with:
+
+```text
+NEXT_PUBLIC_ACTUATOR_CONTRACT_ADDRESS=0x...
+```
+
+Deployment runs through `node scripts/deploy-actuator-contract.mjs`, which
+submits `Revive.instantiate_with_code` only. CDM registry publication is
+skipped because the devnet ContractRegistry currently traps on new package
+names; `@industrial/actuator` remains the package name. See
+[docs/ACTUATOR.md](docs/ACTUATOR.md) for that analysis and for the
+light-client, relay, timing, and trust-boundary design.
 
 ## Run
 
@@ -129,11 +164,13 @@ For the real Statement Store host path, open the app inside the Polkadot Desktop
 ## Current behavior
 
 1. The Products host exposes a publisher account; `StatementStoreClient` connects through the host-authorized Statement Store path in `host` mode.
-2. `LocalSensorTest` polls `http://192.168.1.42/sensor.txt` every 10 seconds, parses `T=…,H=…`, and validates both values.
+2. `LocalSensorTest` polls `http://192.168.1.42/sensor.txt` every 10 seconds, parses `T=…,H=…,N=…,S=…`, and validates the environmental and optional actuator values.
 3. When a valid physical reading is available, the desktop gateway publishes it to `topic2 = warehouse-01` every 30 seconds (manual publish and an allowance-request flow are also available).
-4. Every client (desktop, Android, iPhone) subscribes to `topic2 = warehouse-01` and updates the temperature/humidity display from received statements.
+4. Every client (desktop, Android, iPhone) subscribes to `topic2 = warehouse-01` and updates the temperature, humidity, and ESP32-reported actuator display from received statements.
 5. A signal is `LIVE` below 45 seconds, `STALE` from 45–90 seconds, and `NO SIGNAL` after 90 seconds.
 6. Up to 20 recent Celerity readings are kept in memory only.
 7. The physical-sensor and gateway-publishing panels are hidden on any client where the local ESP32 endpoint is not reachable.
 
-No backend, database, persistent storage, or smart contract is included. ESP32 firmware is not part of this repository.
+No backend, database, centralized controller, or simulated ESP32 acknowledgement
+is included. The Solidity contract source is under `contract/`; deployment and
+the future ESP32 light-client firmware remain manual steps.

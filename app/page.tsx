@@ -16,7 +16,13 @@ import {
   LocalSensorTest,
   type LocalSensorStatus,
 } from "../components/LocalSensorTest";
+import { ActuatorPanel } from "../components/ActuatorPanel";
 import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
+import {
+  isSensorReading,
+  toSensorReading,
+  type SensorReading,
+} from "../lib/telemetry/sensorReading";
 
 const APP_NAME = "industrial";
 const TOPIC_2 = "warehouse-01";
@@ -31,14 +37,6 @@ const MAX_EVENTS = 20;
 const HOST_TIMEOUT_MS = 12_000;
 const STORE_TIMEOUT_MS = 15_000;
 const ALLOWANCE_TIMEOUT_MS = 60_000;
-
-type SensorReading = {
-  type: "env";
-  sensor: "WAREHOUSE-01";
-  temperature: number;
-  humidity: number;
-  timestamp: number;
-};
 
 type EventRow = SensorReading & { receivedAt: number; signer?: string };
 type ConnectionState = "connecting" | "connected" | "error";
@@ -130,21 +128,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
     const timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
     promise.then(resolve, reject).finally(() => window.clearTimeout(timeout));
   });
-}
-
-function isSensorReading(value: unknown): value is SensorReading {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  return (
-    row.type === "env" &&
-    row.sensor === SENSOR_ID &&
-    typeof row.temperature === "number" &&
-    Number.isFinite(row.temperature) &&
-    typeof row.humidity === "number" &&
-    Number.isFinite(row.humidity) &&
-    typeof row.timestamp === "number" &&
-    Number.isFinite(row.timestamp)
-  );
 }
 
 function ageLabel(timestamp: number | null, now: number): string {
@@ -420,13 +403,7 @@ export default function Home() {
       return false;
     }
 
-    const reading: SensorReading = {
-      type: "env",
-      sensor: SENSOR_ID,
-      temperature: current.temperature,
-      humidity: current.humidity,
-      timestamp: current.timestamp,
-    };
+    const reading = toSensorReading(current);
 
     publishInFlightRef.current = true;
     setPublishing(true);
@@ -649,7 +626,7 @@ export default function Home() {
       <section className="hero panel">
         <div className="heroTitle">
           <span>CELERITY LIVE · REMOTE RECEIVER</span>
-          <strong>{SENSOR_NAME}</strong>
+          <strong>{SENSOR_ID}</strong>
         </div>
         <div className="metrics">
           <div className="metric">
@@ -661,6 +638,10 @@ export default function Home() {
             <strong>{latest ? latest.humidity.toFixed(1) : "—"}<small> %</small></strong>
           </div>
         </div>
+        <div className="heroActuator">
+          <div><span>ACTUATOR-01 state</span><strong className={latest?.actuatorState === "ON" ? "actuatorOn" : "actuatorOff"}>{latest?.actuatorState ?? "—"}</strong></div>
+          <div><span>Last trigger observed by device</span><strong>{latest?.actuatorNonce === undefined ? "—" : `#${latest.actuatorNonce}`}</strong></div>
+        </div>
         <div className="metaGrid">
           <div><span>Namespace</span><strong>{APP_NAME}</strong></div>
           <div><span>Topic</span><strong>{TOPIC_2}</strong></div>
@@ -668,6 +649,11 @@ export default function Home() {
           <div><span>Signals received</span><strong>{events.length}</strong></div>
         </div>
       </section>
+
+      <ActuatorPanel
+        deviceNonce={latest?.actuatorNonce}
+        deviceState={latest?.actuatorState}
+      />
 
       {physicalReading ? <section className="panel connectionPanel">
         <div><span className="label">Connection</span><strong>{connectionDetail}</strong></div>
@@ -696,13 +682,15 @@ export default function Home() {
         ) : (
           <div className="tableWrap">
             <table>
-              <thead><tr><th>Received</th><th>Temperature</th><th>Humidity</th><th>Sensor time</th><th>Signer</th></tr></thead>
+              <thead><tr><th>Received</th><th>Temperature</th><th>Humidity</th><th>Actuator</th><th>Trigger</th><th>Sensor time</th><th>Signer</th></tr></thead>
               <tbody>
                 {events.map((event, index) => (
                   <tr key={`${event.receivedAt}-${index}`}>
                     <td>{new Date(event.receivedAt).toLocaleTimeString()}</td>
                     <td>{event.temperature.toFixed(1)} °C</td>
                     <td>{event.humidity.toFixed(1)} %</td>
+                    <td>{event.actuatorState ?? "—"}</td>
+                    <td>{event.actuatorNonce === undefined ? "—" : `#${event.actuatorNonce}`}</td>
                     <td>{new Date(event.timestamp).toLocaleTimeString()}</td>
                     <td><code>{shortHex(event.signer)}</code></td>
                   </tr>

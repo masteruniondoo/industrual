@@ -1,0 +1,16 @@
+.cdm/
+node_modules/
+target/
+dist/
+
+cache/
+cache-test/
+artifacts/
+artifacts-test/
+coverage/
+coverage.json
+typechain/
+typechain-types/
+
+.env
+.DS_Store

@@ -197,6 +197,11 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
           <span className="dot" /> SENSOR ONLINE
         </div>
 
+        <div className="localActuatorState">
+          <div><span>ACTUATOR-01 state</span><strong className={reading.actuatorState === "ON" ? "actuatorOn" : "actuatorOff"}>{reading.actuatorState ?? "—"}</strong></div>
+          <div><span>Last trigger observed</span><strong>{reading.actuatorNonce === undefined ? "—" : `#${reading.actuatorNonce}`}</strong></div>
+        </div>
+
         <div className="localSensorDetails">
           <div><span className="label">Source</span><code>LOCAL HTTP</code></div>
           <div><span className="label">Polling</span><code>10 SEC</code></div>
