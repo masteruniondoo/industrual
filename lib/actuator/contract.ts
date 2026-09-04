@@ -4,8 +4,14 @@ import {
   ensureContractAccountMapped,
   createContract,
 } from "@parity/product-sdk-contracts";
-import { paseo_asset_hub } from "@parity/product-sdk-descriptors/paseo-asset-hub";
-import { SignerManager } from "@parity/product-sdk-signer";
+import { devnet_asset_hub } from "@parity/product-sdk-descriptors/devnet-asset-hub";
+import {
+  DevProvider,
+  HostProvider,
+  SignerManager,
+  type SignerAccount,
+} from "@parity/product-sdk-signer";
+import { requestPermission, requestResourceAllocation } from "@parity/product-sdk-host";
 import type { TxStatus } from "@parity/product-sdk-tx";
 import { ACTUATOR_ABI } from "./abi";
 import {
@@ -13,21 +19,23 @@ import {
   ACTUATOR_PRICE_EVM,
   ACTUATOR_PRICE_NATIVE,
 } from "./config";
-import { preflightFailureError } from "./preflight";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
-const DOT_NS_IDENTIFIER = "industrial.dot";
+const CONNECTION_TIMEOUT_MS = 30_000;
 const READ_TIMEOUT_MS = 60_000;
 const MAPPING_TIMEOUT_MS = 90_000;
+const ALLOWANCE_TIMEOUT_MS = 60_000;
+const TRANSACTION_TIMEOUT_MS = 120_000;
+const DOT_NS_IDENTIFIER = "industrial.dot";
 const submissionLock = new ActuatorSubmissionLock();
 
 type ActuatorContext = Awaited<ReturnType<typeof createContext>>;
 let contextPromise: Promise<ActuatorContext> | null = null;
+let connectedAccountAddress: string | null = null;
+let chainSubmitPermissionVerified = false;
 
 export type ActuatorTransactionStatus =
   | "connecting"
-  | "checking-balance"
-  | "mapping"
   | "signing"
   | "broadcasting"
   | "in-block"
@@ -84,45 +92,77 @@ function sdkErrorMessage(error: unknown): string {
 }
 
 function asActivationError(error: unknown): unknown {
-  if (sdkErrorMessage(error).includes("TransferFailed")) {
+  const message = sdkErrorMessage(error);
+  if (message.includes("AccountUnmapped")) {
+    return new Error(
+      "The wallet account is not mapped for Revive on this network. " +
+        "Complete the account mapping in the wallet, then try payment again.",
+    );
+  }
+  if (message.includes("TransferFailed")) {
     return new Error(
       "The chain rejected the payment: the account could not transfer 1 PAS. " +
         "Check the balance and try again.",
     );
   }
+  if (/timed?\s*out|timeout/i.test(message)) {
+    return new Error(
+      "The payment was not finalized within 2 minutes. It may still be processing; " +
+        "check the wallet activity before trying again.",
+    );
+  }
   return error;
 }
 
-/**
- * Dry-runs the paid call before the wallet is touched. The dry run executes
- * the same `ReviveApi.call` the transaction would, so an account that cannot
- * pay fails here with `TransferFailed` instead of after the user has signed.
- */
-async function assertActivationAffordable(
-  contract: Awaited<ReturnType<typeof createContext>>["contract"],
-  address: string,
-) {
-  const dryRun = await withTimeout(
-    contract.trigger.query({
-      origin: address,
-      value: ACTUATOR_PRICE_NATIVE,
-      at: "finalized",
-    }),
-    READ_TIMEOUT_MS,
-    "activation pre-flight",
+async function requestSigningPermission() {
+  if (chainSubmitPermissionVerified) return;
+  const permission = await withTimeout(
+    requestPermission({ tag: "ChainSubmit", value: undefined }),
+    CONNECTION_TIMEOUT_MS,
+    "wallet signing permission",
   );
-  if (!dryRun.success) throw preflightFailureError(dryRun.value);
+  if (!permission.ok) throw permission.error;
+  if (!permission.value) {
+    throw new Error("Wallet signing permission was denied.");
+  }
+  chainSubmitPermissionVerified = true;
+}
+
+async function ensureSmartContractAllowance(address: string) {
+  const allocation = await withTimeout(
+    requestResourceAllocation([{ tag: "SmartContractAllowance", value: 0 }]),
+    ALLOWANCE_TIMEOUT_MS,
+    "smart-contract allowance",
+  );
+  if (!allocation.ok) throw allocation.error;
+  const outcome = allocation.value[0];
+  if (outcome !== "Allocated") {
+    throw new Error(`Smart-contract allowance is not available for ${address}.`);
+  }
 }
 
 async function createContext() {
   const address = requireContractAddress();
-  const chain = await getChainAPI("devnet");
+  const signerManager = new SignerManager({
+    dappName: "industrial.dot",
+    createProvider: (type) =>
+      type === "host"
+        ? new HostProvider({
+            dappName: "industrial.dot",
+            requestChainSubmitPermission: false,
+          })
+        : new DevProvider(),
+  });
+  const chain = await withTimeout(
+    getChainAPI("devnet"),
+    CONNECTION_TIMEOUT_MS,
+    "Products Devnet connection",
+  );
   const runtime = createContractRuntimeFromClient(
     chain.raw.assetHub,
-    paseo_asset_hub,
+    devnet_asset_hub,
     { at: "finalized" },
   );
-  const signerManager = new SignerManager({ dappName: "industrial" });
   const contract = createContract(runtime, address, ACTUATOR_ABI, {
     signerManager,
   });
@@ -142,9 +182,34 @@ export function isActuatorContractConfigured() {
   return ACTUATOR_CONTRACT_ADDRESS !== null;
 }
 
+export async function connectActuatorWallet(): Promise<string> {
+  const { signerManager } = await getContext();
+  const connected = await withTimeout(
+    signerManager.connect("host"),
+    CONNECTION_TIMEOUT_MS,
+    "wallet connection",
+  );
+  if (!connected.ok) throw connected.error;
+
+  const productAccount = await withTimeout(
+    signerManager.getProductAccount(DOT_NS_IDENTIFIER),
+    CONNECTION_TIMEOUT_MS,
+    "application account",
+  );
+  if (!productAccount.ok) throw productAccount.error;
+
+  connectedAccountAddress = productAccount.value.address;
+  chainSubmitPermissionVerified = false;
+  return productAccount.value.address;
+}
+
 export async function readTriggerNonce(): Promise<bigint> {
   const { contract } = await getContext();
-  const result = await contract.triggerNonce.query({ at: "finalized" });
+  const result = await withTimeout(
+    contract.triggerNonce.query({ at: "finalized" }),
+    READ_TIMEOUT_MS,
+    "triggerNonce read",
+  );
   if (!result.success) {
     throw new Error(`Unable to read triggerNonce: ${sdkErrorMessage(result.value)}`);
   }
@@ -153,7 +218,11 @@ export async function readTriggerNonce(): Promise<bigint> {
 
 export async function readPrice(): Promise<bigint> {
   const { contract } = await getContext();
-  const result = await contract.PRICE.query({ at: "finalized" });
+  const result = await withTimeout(
+    contract.PRICE.query({ at: "finalized" }),
+    READ_TIMEOUT_MS,
+    "contract price read",
+  );
   if (!result.success) {
     throw new Error(`Unable to read PRICE: ${sdkErrorMessage(result.value)}`);
   }
@@ -164,52 +233,50 @@ export async function triggerActuator(
   onStatus?: (status: ActuatorTransactionStatus) => void,
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
-    onStatus?.("connecting");
     const { contract, runtime, signerManager } = await getContext();
+    const account = signerManager
+      .getState()
+      .accounts.find((candidate) => candidate.address === connectedAccountAddress);
+    if (!account) {
+      throw new Error("Connect the wallet before paying.");
+    }
 
-    const connected = await signerManager.connect("host");
-    if (!connected.ok) throw connected.error;
+    onStatus?.("connecting");
+    await ensureSmartContractAllowance(account.address);
+    await requestSigningPermission();
 
-    const productAccount = await signerManager.getProductAccount(DOT_NS_IDENTIFIER);
-    if (!productAccount.ok) throw productAccount.error;
-
-    const signer = productAccount.value.getSigner();
-
-    // Checked before anything is signed: the chain would otherwise reject the
-    // call with Revive.TransferFailed only after the user has approved it.
-    onStatus?.("checking-balance");
-    await assertActivationAffordable(contract, productAccount.value.address);
-
-    onStatus?.("mapping");
+    const signer = account.getSigner();
+    onStatus?.("signing");
     const mapping = await withTimeout(
-      ensureContractAccountMapped(runtime, productAccount.value.address, signer),
+      ensureContractAccountMapped(runtime, account.address, signer, {
+        timeoutMs: MAPPING_TIMEOUT_MS,
+      }),
       MAPPING_TIMEOUT_MS,
       "account mapping",
     );
     if (!mapping.ok) throw mapping.error;
 
-    const configuredPrice = await withTimeout(readPrice(), READ_TIMEOUT_MS, "contract price read");
-    if (configuredPrice !== ACTUATOR_PRICE_EVM) {
-      throw new Error(`Unexpected contract price: ${configuredPrice.toString()}.`);
-    }
-
     const result = await contract.trigger.tx({
-      origin: productAccount.value.address,
+      origin: account.address,
       signer,
       value: ACTUATOR_PRICE_NATIVE,
       waitFor: "finalized",
+      timeoutMs: TRANSACTION_TIMEOUT_MS,
       onStatus: (status: TxStatus) => onStatus?.(status),
     });
     if (!result.ok) throw asActivationError(result.error);
 
     onStatus?.("finalized");
     const triggerNonce = await withTimeout(
-      readTriggerNonce(),
+      contract.triggerNonce.query({ origin: account.address, at: "finalized" }),
       READ_TIMEOUT_MS,
       "triggerNonce refresh",
     );
+    if (!triggerNonce.success) {
+      throw new Error(`Unable to read triggerNonce: ${sdkErrorMessage(triggerNonce.value)}`);
+    }
     return {
-      triggerNonce,
+      triggerNonce: toBigInt(triggerNonce.value, "triggerNonce"),
       transactionHash: result.value.txHash,
     };
   });

@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ActuatorState } from "../lib/http/parseLocalSensorPayload";
 import {
+  connectActuatorWallet,
   isActuatorContractConfigured,
-  readPrice,
   readTriggerNonce,
   triggerActuator,
   type ActuatorTransactionStatus,
@@ -14,7 +14,6 @@ import {
   ACTUATOR_NETWORK,
   ACTUATOR_PACKAGE_NAME,
   ACTUATOR_PRICE_LABEL,
-  ACTUATOR_PRICE_EVM,
   ACTUATOR_RUN_SECONDS,
 } from "../lib/actuator/config";
 
@@ -25,12 +24,14 @@ type ActuatorPanelProps = {
 
 type ActivationPhase =
   | "unconfigured"
-  | "loading"
-  | "ready"
-  | "requested"
-  | "checking"
+  | "disconnected"
+  | "connecting"
   | "preparing"
-  | "confirming"
+  | "connected"
+  | "requested"
+  | "broadcasting"
+  | "in-block"
+  | "verifying"
   | "confirmed"
   | "error";
 
@@ -46,41 +47,29 @@ function messageFromError(error: unknown) {
 export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) {
   const configured = isActuatorContractConfigured();
   const [phase, setPhase] = useState<ActivationPhase>(
-    configured ? "loading" : "unconfigured",
+    configured ? "disconnected" : "unconfigured",
   );
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [chainNonce, setChainNonce] = useState<bigint | null>(null);
   const [confirmedNonce, setConfirmedNonce] = useState<bigint | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshChainState = useCallback(async () => {
-    if (!configured) return;
-    const [nonce, price] = await Promise.all([readTriggerNonce(), readPrice()]);
-    if (price !== ACTUATOR_PRICE_EVM) {
-      throw new Error(`Unexpected contract price: ${price.toString()}.`);
-    }
-    setChainNonce(nonce);
-  }, [configured]);
-
   useEffect(() => {
-    let cancelled = false;
     if (!configured) return;
 
-    void refreshChainState()
-      .then(() => {
-        if (!cancelled) setPhase("ready");
+    let cancelled = false;
+    void readTriggerNonce()
+      .then((nonce) => {
+        if (!cancelled) setChainNonce(nonce);
       })
       .catch((readError) => {
-        console.error("[industrial:actuator] Contract state read failed", readError);
-        if (!cancelled) {
-          setError(messageFromError(readError));
-          setPhase("error");
-        }
+        console.warn("[industrial:actuator] Initial trigger nonce read failed", readError);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [configured, refreshChainState]);
+  }, [configured]);
 
   function handleTransactionStatus(status: ActuatorTransactionStatus) {
     if (status === "error") {
@@ -88,22 +77,42 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
       return;
     }
     if (status === "connecting" || status === "signing") {
+      if (status === "connecting") {
+        setPhase("preparing");
+        return;
+      }
       setPhase("requested");
       return;
     }
-    if (status === "checking-balance") {
-      setPhase("checking");
+    if (status === "broadcasting") {
+      setPhase("broadcasting");
       return;
     }
-    if (status === "mapping") {
-      setPhase("preparing");
+    if (status === "in-block") {
+      setPhase("in-block");
       return;
     }
-    if (status !== "finalized") setPhase("confirming");
+    if (status === "finalized") setPhase("verifying");
+  }
+
+  async function connectWallet() {
+    if (!configured || pending || walletAddress) return;
+
+    setError(null);
+    setPhase("connecting");
+    try {
+      const address = await connectActuatorWallet();
+      setWalletAddress(address);
+      setPhase("connected");
+    } catch (connectionError) {
+      console.error("[industrial:actuator] Wallet connection failed", connectionError);
+      setError(messageFromError(connectionError));
+      setPhase("error");
+    }
   }
 
   async function activate() {
-    if (!configured || pending) return;
+    if (!configured || pending || !walletAddress) return;
 
     setError(null);
     setConfirmedNonce(null);
@@ -121,10 +130,12 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   }
 
   const pending =
-    phase === "requested" ||
-    phase === "checking" ||
+    phase === "connecting" ||
     phase === "preparing" ||
-    phase === "confirming";
+    phase === "requested" ||
+    phase === "broadcasting" ||
+    phase === "in-block" ||
+    phase === "verifying";
   const stateClass = deviceState === "ON" ? "actuatorOn" : "actuatorOff";
 
   return (
@@ -169,23 +180,32 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
       <div className="actuatorAction">
         <button
           className="primaryButton"
-          onClick={() => void activate()}
-          disabled={!configured || pending || phase === "loading"}
+          onClick={() => void (walletAddress ? activate() : connectWallet())}
+          disabled={!configured || pending}
         >
           {!configured
             ? "CONTRACT NOT DEPLOYED"
+            : !walletAddress
+              ? "CONNECT WALLET"
+              : phase === "connecting" || phase === "preparing"
+                ? "PREPARING PAYMENT..."
             : phase === "requested"
               ? "ACTIVATION REQUESTED"
-              : phase === "confirming"
-                ? "CONFIRMING ON-CHAIN TRIGGER..."
-                : "ACTIVATE — 1 PAS"}
+              : phase === "broadcasting"
+                ? "BROADCASTING PAYMENT..."
+                : phase === "in-block" || phase === "verifying"
+                  ? "CONFIRMING ON-CHAIN TRIGGER..."
+                  : "PAY 1 PAS"}
         </button>
 
         <div className="actuatorResult" aria-live="polite">
+            {phase === "connecting" ? <><strong>CONNECTING WALLET</strong><span>Approve wallet access in the host.</span></> : null}
+            {phase === "preparing" ? <><strong>PREPARING PAYMENT</strong><span>Preparing the account and payment request.</span></> : null}
+            {phase === "connected" && walletAddress ? <><strong>WALLET CONNECTED</strong><span className="walletAddress">{walletAddress}</span></> : null}
           {phase === "requested" ? <><strong>ACTIVATION REQUESTED</strong><span>Waiting for signature...</span></> : null}
-          {phase === "checking" ? <><strong>CHECKING BALANCE</strong><span>Confirming the account can cover 1 PAS plus fees.</span></> : null}
-          {phase === "preparing" ? <><strong>PREPARING ACCOUNT</strong><span>Approve the one-time account mapping in your wallet.</span></> : null}
-          {phase === "confirming" ? <><strong>CONFIRMING ON-CHAIN TRIGGER...</strong><span>Waiting for finalized transaction.</span></> : null}
+          {phase === "broadcasting" ? <><strong>PAYMENT BROADCAST</strong><span>Waiting for the network to include the transaction.</span></> : null}
+          {phase === "in-block" ? <><strong>PAYMENT IN BLOCK</strong><span>Waiting for finalization.</span></> : null}
+          {phase === "verifying" ? <><strong>PAYMENT FINALIZED</strong><span>Verifying the updated contract state.</span></> : null}
           {phase === "confirmed" && confirmedNonce !== null ? <><strong>PAYMENT CONFIRMED</strong><span>Activation #{confirmedNonce.toString()}</span><span>On-chain trigger ready for actuator.</span></> : null}
           {phase === "unconfigured" ? <><strong>DEPLOYMENT REQUIRED</strong><span>Contract package {ACTUATOR_PACKAGE_NAME} has no configured address.</span></> : null}
           {phase === "error" ? <><strong>ACTIVATION ERROR</strong><span>{error}</span></> : null}

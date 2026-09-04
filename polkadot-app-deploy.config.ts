@@ -4,7 +4,7 @@ const deployConfig = {
   description:
     "Industrial telemetry and paid actuator triggers through Polkadot Celerity and Asset Hub.",
   icon: { path: "./public/industrial-icon.png", format: "png" },
-  executables: [{ kind: "app", path: "./out", appVersion: [0, 11, 0] }],
+  executables: [{ kind: "app", path: "./out", appVersion: [0, 11, 8] }],
 };
 
 export default deployConfig;

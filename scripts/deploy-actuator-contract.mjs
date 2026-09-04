@@ -20,7 +20,7 @@ import { resolve } from "node:path";
 import { Binary, createClient } from "polkadot-api";
 import { getPolkadotSigner } from "polkadot-api/signer";
 import { getWsProvider } from "polkadot-api/ws";
-import { paseo_asset_hub } from "@parity/product-sdk-descriptors/paseo-asset-hub";
+import { devnet_asset_hub } from "@parity/product-sdk-descriptors/devnet-asset-hub";
 import {
   cryptoWaitReady,
   encodeAddress,
@@ -72,7 +72,7 @@ const main = async () => {
   );
 
   const client = createClient(getWsProvider(ASSET_HUB_URL));
-  const api = client.getTypedApi(paseo_asset_hub);
+  const api = client.getTypedApi(devnet_asset_hub);
   const spec = await client.getChainSpecData();
   const decimals = spec.properties?.tokenDecimals ?? 10;
   const symbol = spec.properties?.tokenSymbol ?? "PAS";

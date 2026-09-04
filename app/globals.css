@@ -103,6 +103,7 @@ h2 { margin: 5px 0 0; font-size: 23px; letter-spacing: -.025em; }
 .actuatorResult { display: grid; gap: 4px; min-height: 44px; align-content: center; }
 .actuatorResult strong { color: var(--soft); font-size: 12px; letter-spacing: .06em; }
 .actuatorResult span { color: var(--muted); font-size: 12px; }
+.actuatorResult .walletAddress { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .actuatorContractMeta { margin-top: 18px; }
 
 .eventPanel { margin-top: 16px; padding: 22px; }

@@ -1,6 +1,6 @@
 {
     "name": "industrial-sensor",
-    "version": "0.11.0",
+    "version": "0.11.8",
     "private": true,
     "engines": {
         "node": ">=22"
@@ -20,13 +20,13 @@
         "deploy:devnet:secure": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-with-mnemonic.ps1"
     },
     "dependencies": {
-        "@parity/product-sdk-chain-client": "^0.8.0",
-        "@parity/product-sdk-contracts": "^0.9.0",
-        "@parity/product-sdk-descriptors": "^0.7.0",
-        "@parity/product-sdk-host": "^0.16.0",
-        "@parity/product-sdk-signer": "^0.10.0",
+        "@parity/product-sdk-chain-client": "0.9.1",
+        "@parity/product-sdk-contracts": "0.9.2",
+        "@parity/product-sdk-descriptors": "0.8.0",
+        "@parity/product-sdk-host": "0.14.1",
+        "@parity/product-sdk-signer": "0.11.1",
         "@parity/product-sdk-statement-store": "^0.6.5",
-        "@parity/product-sdk-tx": "^0.3.0",
+        "@parity/product-sdk-tx": "0.3.2",
         "@polkadot/util-crypto": "13.5.9",
         "next": "16.3.0",
         "polkadot-api": "^2.1.7",

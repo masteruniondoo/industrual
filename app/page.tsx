@@ -543,11 +543,11 @@ export default function Home() {
         </div>
         <div>
           <span className="eyebrow">DEMONSTRATION COMPLETED</span>
-          <h2>More than 30 hours of continuous monitoring</h2>
           <p>
-            Temperature and humidity broadcasting has ended after more than 30 hours of
-            uninterrupted operation. The test successfully demonstrated sensor message
-            delivery through Polkadot Celerity.
+            The ESP32 acts as a light client, watching the smart contract&apos;s finalized
+            trigger nonce. When the nonce increases, it activates the actuator. Temperature,
+            humidity, the observed nonce, and actuator state are broadcast through Polkadot
+            Celerity.
           </p>
         </div>
       </section> : null}
