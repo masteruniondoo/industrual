@@ -7,7 +7,6 @@ import {
   isActuatorContractConfigured,
   readPublicTriggerNonce,
   readTriggerNonce,
-  resetActuatorSession,
   triggerActuator,
   type ActuatorTransactionStatus,
 } from "../lib/actuator/contract";
@@ -55,7 +54,6 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   const [chainNonce, setChainNonce] = useState<bigint | null>(null);
   const [confirmedNonce, setConfirmedNonce] = useState<bigint | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     if (!configured) return;
@@ -113,24 +111,6 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
       console.error("[industrial:actuator] Wallet connection failed", connectionError);
       setError(messageFromError(connectionError));
       setPhase("error");
-    }
-  }
-
-  // The only guaranteed way out of a wedged flow. Tears down the lock, the
-  // cached chain context, the assumed signing permission and the remembered
-  // account, then puts the panel back at the start.
-  async function resetSession() {
-    setResetting(true);
-    try {
-      await resetActuatorSession();
-    } catch (resetError) {
-      console.warn("[industrial:actuator] Session reset reported a problem", resetError);
-    } finally {
-      setResetting(false);
-      setError(null);
-      setConfirmedNonce(null);
-      setWalletAddress(null);
-      setPhase(configured ? "disconnected" : "unconfigured");
     }
   }
 
@@ -225,17 +205,6 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
                   ? "CONFIRMING ON-CHAIN TRIGGER..."
                   : "PAY 1 PAS"}
         </button>
-
-        {configured && (pending || phase === "error" || walletAddress) ? (
-          <button
-            className="secondaryButton"
-            onClick={() => void resetSession()}
-            disabled={resetting}
-            title="Clear the payment session and start over"
-          >
-            {resetting ? "RESETTING..." : "RESET PAYMENT SESSION"}
-          </button>
-        ) : null}
 
         <div className="actuatorResult" aria-live="polite">
             {phase === "connecting" ? <><strong>CONNECTING WALLET</strong><span>Approve wallet access in the host.</span></> : null}

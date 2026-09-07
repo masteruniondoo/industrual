@@ -13,7 +13,6 @@ import {
   SignerManager,
   type SignerAccount,
 } from "@parity/product-sdk-signer";
-import { requestPermission, requestResourceAllocation } from "@parity/product-sdk-host";
 import type { TxStatus } from "@parity/product-sdk-tx";
 import { ACTUATOR_ABI } from "./abi";
 import {
@@ -23,7 +22,6 @@ import {
 } from "./config";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
-export { StaleActuatorSubmissionError } from "./submissionLock";
 
 const CONNECTION_TIMEOUT_MS = 30_000;
 const READ_TIMEOUT_MS = 60_000;
@@ -41,21 +39,44 @@ const submissionLock = new ActuatorSubmissionLock();
 type ActuatorContext = Awaited<ReturnType<typeof createContext>>;
 let contextPromise: Promise<ActuatorContext> | null = null;
 let connectedAccountAddress: string | null = null;
-let chainSubmitPermissionVerified = false;
+// Revive requires a mapping per signing account before it accepts Revive.call.
+// ensureContractAccountMapped is idempotent, but it is a chain read plus a
+// possible signature, so it runs once per connected account, not per payment.
+let mappedAccountAddress: string | null = null;
 let publicReadContextPromise: Promise<{
   contract: Awaited<ReturnType<typeof createContext>>["contract"];
   client: ReturnType<typeof createClient>;
 }> | null = null;
 
+// The SDK's documented shape. Two things it does that this app used to do by
+// hand inside the payment, and that belong here instead:
+//
+//   * onConnect is where resource allowances go. Per the SDK and the Polkadot
+//     docs: "Request the resources your Product needs here, before any signing
+//     call is made." It fires once per connection and re-fires after the SDK's
+//     own auto-reconnect, which is the recovery path - not a manual reset.
+//   * requestChainSubmitPermission defaults to true, so the host grants signing
+//     right after connect(). Disabling it only makes sense for an app that
+//     drives the prompt itself, which pushed the prompt into the payment click.
+//
+// ctx.requestResourceAllocation throws instead of returning a Result, so the
+// failure surfaces through connect() rather than being silently swallowed.
 const signerManager = new SignerManager({
   dappName: "industrial.dot",
   createProvider: (type) =>
-    type === "host"
-      ? new HostProvider({
-          dappName: "industrial.dot",
-          requestChainSubmitPermission: false,
-        })
-      : new DevProvider(),
+    type === "host" ? new HostProvider({ dappName: "industrial.dot" }) : new DevProvider(),
+  onConnect: async (_account, { requestResourceAllocation }) => {
+    const outcomes = await withTimeout(
+      requestResourceAllocation([{ tag: "SmartContractAllowance", value: 0 }]),
+      ALLOWANCE_TIMEOUT_MS,
+      "smart-contract allowance",
+    );
+    if (outcomes[0] !== "Allocated") {
+      throw new Error(
+        "The smart-contract allowance was not granted. Reconnect the wallet and approve it.",
+      );
+    }
+  },
 });
 
 export type ActuatorTransactionStatus =
@@ -138,33 +159,6 @@ function asActivationError(error: unknown): unknown {
   return error;
 }
 
-async function requestSigningPermission() {
-  if (chainSubmitPermissionVerified) return;
-  const permission = await withTimeout(
-    requestPermission({ tag: "ChainSubmit", value: undefined }),
-    CONNECTION_TIMEOUT_MS,
-    "wallet signing permission",
-  );
-  if (!permission.ok) throw permission.error;
-  if (!permission.value) {
-    throw new Error("Wallet signing permission was denied.");
-  }
-  chainSubmitPermissionVerified = true;
-}
-
-async function ensureSmartContractAllowance(address: string) {
-  const allocation = await withTimeout(
-    requestResourceAllocation([{ tag: "SmartContractAllowance", value: 0 }]),
-    ALLOWANCE_TIMEOUT_MS,
-    "smart-contract allowance",
-  );
-  if (!allocation.ok) throw allocation.error;
-  const outcome = allocation.value[0];
-  if (outcome !== "Allocated") {
-    throw new Error(`Smart-contract allowance is not available for ${address}.`);
-  }
-}
-
 async function createContext() {
   const address = requireContractAddress();
   const chain = await withTimeout(
@@ -196,33 +190,13 @@ export function isActuatorContractConfigured() {
   return ACTUATOR_CONTRACT_ADDRESS !== null;
 }
 
-// Cached state that must not outlive a single payment attempt. A websocket dies
-// quietly while the app is backgrounded or the device changes network, and a
-// signing permission granted to an earlier host session says nothing about the
-// current one. Reusing either is what leaves the flow wedged.
+// Connecting rebuilds everything, so a socket that died while the app was
+// backgrounded does not survive into the next session. The SDK reconnects its
+// own provider automatically and re-runs onConnect; this covers the chain
+// client, which is ours.
 function clearCachedChainState() {
   contextPromise = null;
-  chainSubmitPermissionVerified = false;
-}
-
-// Full teardown behind the panel's reset control: everything a payment clears,
-// plus the standalone read socket, the remembered account, and a submission
-// lock still held by an attempt that was abandoned and will never settle.
-export async function resetActuatorSession(): Promise<void> {
-  submissionLock.reset();
-  clearCachedChainState();
-  connectedAccountAddress = null;
-
-  const publicRead = publicReadContextPromise;
-  publicReadContextPromise = null;
-  if (!publicRead) return;
-
-  try {
-    const { client } = await publicRead;
-    client.destroy();
-  } catch {
-    // A context that never resolved has no socket left to close.
-  }
+  mappedAccountAddress = null;
 }
 
 async function getPublicReadContext() {
@@ -272,9 +246,32 @@ export async function connectActuatorWallet(): Promise<string> {
   );
   if (!productAccount.ok) throw productAccount.error;
 
-  connectedAccountAddress = productAccount.value.address;
-  chainSubmitPermissionVerified = false;
-  return productAccount.value.address;
+  const address = productAccount.value.address;
+
+  // "Call ensureContractAccountMapped once at app boot per signing account -
+  // it's idempotent" (@parity/product-sdk-contracts). Doing it here means the
+  // payment click is a signature and nothing else; doing it inside the payment
+  // is what made the first attempt spend its interaction on setup and fail.
+  if (mappedAccountAddress !== address) {
+    const { runtime } = await getContext();
+    const account = signerManager
+      .getState()
+      .accounts.find((candidate) => candidate.address === address);
+    if (!account) throw new Error("The wallet connected without a usable account.");
+
+    const mapping = await withTimeout(
+      ensureContractAccountMapped(runtime, address, account.getSigner(), {
+        timeoutMs: MAPPING_TIMEOUT_MS,
+      }),
+      MAPPING_TIMEOUT_MS,
+      "account mapping",
+    );
+    if (!mapping.ok) throw asActivationError(mapping.error);
+    mappedAccountAddress = address;
+  }
+
+  connectedAccountAddress = address;
+  return address;
 }
 
 export async function readTriggerNonce(origin?: string): Promise<bigint> {
@@ -307,12 +304,10 @@ export async function triggerActuator(
   onStatus?: (status: ActuatorTransactionStatus) => void,
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
-    // Every payment starts from a clean slate, as required: no chain context
-    // inherited from an attempt that may have been abandoned on another device,
-    // and no assumption that signing permission is still granted.
-    clearCachedChainState();
-
-    const { contract, runtime } = await getContext();
+    // No teardown and no setup here. Allowance, signing permission and account
+    // mapping were all settled at connect time, so this click produces exactly
+    // one host interaction: the signature.
+    const { contract } = await getContext();
     const account = signerManager
       .getState()
       .accounts.find((candidate) => candidate.address === connectedAccountAddress);
@@ -324,19 +319,8 @@ export async function triggerActuator(
     }
 
     onStatus?.("connecting");
-    await ensureSmartContractAllowance(account.address);
-    await requestSigningPermission();
-
     const signer = account.getSigner();
     onStatus?.("signing");
-    const mapping = await withTimeout(
-      ensureContractAccountMapped(runtime, account.address, signer, {
-        timeoutMs: MAPPING_TIMEOUT_MS,
-      }),
-      MAPPING_TIMEOUT_MS,
-      "account mapping",
-    );
-    if (!mapping.ok) throw mapping.error;
 
     // The SDK takes its own timeout, but an abandoned signature can leave the
     // host request itself outstanding, so bound the whole call as well. Without

@@ -18,11 +18,19 @@ import {
 } from "../components/LocalSensorTest";
 import { ActuatorPanel } from "../components/ActuatorPanel";
 import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
+import { watchCelerityConnection } from "../lib/telemetry/connectionRecovery";
+import { createSharedHostTransport } from "../lib/telemetry/sharedHostTransport";
 import {
   isSensorReading,
   toSensorReading,
   type SensorReading,
 } from "../lib/telemetry/sensorReading";
+import {
+  createObservedState,
+  decidePublish,
+  HEARTBEAT_INTERVAL_MS,
+  type PublishReason,
+} from "../lib/telemetry/publishScheduler";
 
 const APP_NAME = "industrial";
 const TOPIC_2 = "warehouse-01";
@@ -30,7 +38,7 @@ const CHANNEL = "warehouse-01/environment";
 const SENSOR_ID = "WAREHOUSE-01";
 const SENSOR_NAME = "Warehouse 1";
 const STATEMENT_TTL_SECONDS = 90;
-const PUBLISH_INTERVAL_MS = 30_000;
+
 const LIVE_UNTIL_MS = 45_000;
 const STALE_UNTIL_MS = 90_000;
 const MAX_EVENTS = 20;
@@ -59,21 +67,6 @@ type DiagnosticState = {
   publish: string;
   lastReceived: string;
 };
-
-let sharedClient: StatementStoreClient | null = null;
-
-function acquireStatementStoreClient() {
-  sharedClient ??= new StatementStoreClient({
-    appName: APP_NAME,
-    defaultTtlSeconds: STATEMENT_TTL_SECONDS,
-  });
-  return sharedClient;
-}
-
-function releaseStatementStoreClient(client: StatementStoreClient) {
-  client.destroy();
-  if (sharedClient === client) sharedClient = null;
-}
 
 function shortHex(value?: string) {
   if (!value) return "—";
@@ -159,6 +152,7 @@ function isMissingAllowanceError(message: string): boolean {
 }
 
 export default function Home() {
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [connectionDetail, setConnectionDetail] = useState("Detecting Polkadot Products host…");
   const [latest, setLatest] = useState<EventRow | null>(null);
@@ -180,11 +174,15 @@ export default function Home() {
     lastReceived: "—",
   });
   const clientRef = useRef<StatementStoreClient | null>(null);
+  const connectingRef = useRef(false);
+  const lastCelerityReceivedAtRef = useRef(0);
   const physicalReadingRef = useRef<HttpSensorReading | null>(null);
   // The receiver ages a statement from its arrival time, so republishing a
   // value the ESP32 no longer stands behind would show stale data as LIVE.
   const physicalReadingIsCurrentRef = useRef(false);
   const publishInFlightRef = useRef(false);
+  // Nonce, actuator state and the heartbeat clock, kept across local polls.
+  const observedRef = useRef(createObservedState());
   const initialPublishAttemptRef = useRef(false);
 
   const updateDiagnostic = useCallback((key: keyof DiagnosticState, value: string) => {
@@ -201,7 +199,7 @@ export default function Home() {
     setLatest((current) => {
       if (current && current.timestamp > received.timestamp) return current;
       if (current?.timestamp === received.timestamp) {
-        return { ...received, signer: signer ?? current.signer };
+        return { ...received, receivedAt: current.receivedAt, signer: signer ?? current.signer };
       }
       return received;
     });
@@ -258,9 +256,9 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    connectingRef.current = true;
     let hostWasDetected = false;
-    const client = acquireStatementStoreClient();
-    clientRef.current = client;
+    let client: StatementStoreClient | null = null;
     let subscription: { unsubscribe: () => void } | undefined;
 
     async function boot() {
@@ -283,6 +281,36 @@ export default function Home() {
         updateDiagnostic("host", "DETECTED");
         setConnectionDetail("Connecting to Celerity / Statement Store in host mode…");
 
+        const transport = await withTimeout(
+          createSharedHostTransport(),
+          STORE_TIMEOUT_MS,
+          "Statement Store host transport timed out.",
+        );
+        if (cancelled) return;
+        client = new StatementStoreClient({
+          appName: APP_NAME,
+          defaultTtlSeconds: STATEMENT_TTL_SECONDS,
+          transport,
+        });
+        clientRef.current = client;
+
+        // connect() starts receiving immediately, including stored statements.
+        // Register first so the SDK does not mark the initial reading as seen
+        // before this receiver has a chance to process it.
+        subscription = client.subscribe<SensorReading>(
+          (statement) => {
+            if (cancelled) return;
+            if (!isSensorReading(statement.data)) {
+              console.warn("[industrial] Ignored malformed or unrelated statement", statement.data);
+              return;
+            }
+
+            recordCelerityReading(statement.data, Date.now(), statement.signerHex);
+            lastCelerityReceivedAtRef.current = Date.now();
+          },
+          { topic2: TOPIC_2 },
+        );
+
         await withTimeout(
           client.connect({ mode: "host" }),
           STORE_TIMEOUT_MS,
@@ -291,28 +319,21 @@ export default function Home() {
         if (cancelled) return;
         updateDiagnostic("statementStore", "CONNECTED (HOST MODE)");
 
-        subscription = client.subscribe<SensorReading>(
-          (statement) => {
-            if (!isSensorReading(statement.data)) {
-              console.warn("[industrial] Ignored malformed or unrelated statement", statement.data);
-              return;
-            }
-
-            recordCelerityReading(statement.data, Date.now(), statement.signerHex);
-          },
-          { topic2: TOPIC_2 },
-        );
-
         updateDiagnostic("subscription", "ACTIVE");
         setConnection("connected");
         setConnectionDetail(`Celerity connected; subscribed to ${SENSOR_NAME}`);
       } catch (error) {
         console.error("[industrial] Celerity boot failed", error);
         if (cancelled) return;
+        subscription?.unsubscribe();
+        client?.destroy();
+        if (clientRef.current === client) clientRef.current = null;
         setConnection("error");
         setConnectionDetail(statementErrorMessage(error));
         if (!hostWasDetected) updateDiagnostic("host", "NOT DETECTED");
         updateDiagnostic("statementStore", `ERROR: ${statementErrorMessage(error)}`);
+      } finally {
+        if (!cancelled) connectingRef.current = false;
       }
     }
 
@@ -320,11 +341,23 @@ export default function Home() {
 
     return () => {
       cancelled = true;
+      connectingRef.current = false;
       subscription?.unsubscribe();
-      releaseStatementStoreClient(client);
+      client?.destroy();
       if (clientRef.current === client) clientRef.current = null;
     };
-  }, [recordCelerityReading, updateDiagnostic]);
+  }, [connectionAttempt, recordCelerityReading, updateDiagnostic]);
+
+  useEffect(() => watchCelerityConnection({
+    lastReceivedAt: () => lastCelerityReceivedAtRef.current,
+    reconnect: () => {
+      // Let an active connection or publish finish before replacing its client.
+      if (connectingRef.current || publishInFlightRef.current) return false;
+      connectingRef.current = true;
+      setConnectionAttempt((attempt) => attempt + 1);
+      return true;
+    },
+  }), []);
 
   const requestAllowance = useCallback(async () => {
     if (
@@ -362,6 +395,7 @@ export default function Home() {
       switch (outcome) {
         case "Allocated":
           setAllowance("allocated");
+          setAutoPublish(true);
           break;
         case "Rejected":
           setAllowance("rejected");
@@ -389,7 +423,7 @@ export default function Home() {
     }
   }, [allowance, connection]);
 
-  const publishCurrentReading = useCallback(async (trigger: "manual" | "automatic") => {
+  const publishCurrentReading = useCallback(async (trigger: PublishReason | "manual") => {
     if (publishInFlightRef.current) return false;
 
     const client = clientRef.current;
@@ -406,7 +440,8 @@ export default function Home() {
       !physicalReadingIsCurrentRef.current ||
       !Number.isFinite(current.temperature) ||
       !Number.isFinite(current.humidity) ||
-      !Number.isFinite(current.timestamp)
+      !Number.isFinite(current.timestamp) ||
+      Date.now() - current.timestamp >= LIVE_UNTIL_MS
     ) {
       const message = "REJECTED: NO VALID PHYSICAL SENSOR READING";
       setLastPublishResult(message);
@@ -414,7 +449,7 @@ export default function Home() {
       return false;
     }
 
-    const reading = toSensorReading(current);
+    const reading = toSensorReading(current, trigger);
 
     publishInFlightRef.current = true;
     setPublishing(true);
@@ -454,7 +489,9 @@ export default function Home() {
           ? "not-requested"
           : currentAllowance,
       );
-      setAutoPublish(false);
+      // A transient submission failure must not permanently stop the gateway.
+      // Missing allowance requires user action; other failures retry next tick.
+      if (isMissingAllowanceError(message)) setAutoPublish(false);
       return false;
     } finally {
       publishInFlightRef.current = false;
@@ -472,20 +509,35 @@ export default function Home() {
       return;
     }
 
+    // Arming is enough: the scheduling effect below treats the next snapshot as
+    // a due heartbeat and sends it, so start-up produces one message, not two.
     initialPublishAttemptRef.current = true;
-    void publishCurrentReading("automatic").then((accepted) => {
-      if (accepted) setAutoPublish(true);
-    });
-  }, [allowance, connection, physicalReading, publishCurrentReading]);
+    setAutoPublish(true);
+  }, [allowance, connection, physicalReading]);
 
+  // One decision per local snapshot, so a nonce step and the actuator switching
+  // on in the same reading cost one message rather than two. decidePublish
+  // adopts the snapshot as it decides, which also makes a re-run for the same
+  // reading a no-op when an unrelated render retriggers this effect.
   useEffect(() => {
-    if (!autoPublish) return;
-    const celerityPublishTimer = window.setInterval(
-      () => void publishCurrentReading("automatic"),
-      PUBLISH_INTERVAL_MS,
+    if (
+      !autoPublish ||
+      connection !== "connected" ||
+      publishing ||
+      !physicalReading ||
+      !physicalReadingIsCurrentRef.current
+    ) return;
+
+    const decision = decidePublish(
+      observedRef.current,
+      physicalReading,
+      Date.now(),
+      HEARTBEAT_INTERVAL_MS,
     );
-    return () => window.clearInterval(celerityPublishTimer);
-  }, [autoPublish, publishCurrentReading]);
+    if (!decision.publish) return;
+
+    void publishCurrentReading(decision.reason);
+  }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading]);
 
   function toggleAutoPublish() {
     if (autoPublish) {

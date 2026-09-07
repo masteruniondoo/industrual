@@ -18,9 +18,9 @@ Industrial.dot is an IoT demonstration of real-time sensor-message delivery thro
    T=23.0,H=48.0,N=18,S=OFF
    ```
 
-3. **Desktop gateway** — A desktop computer on the same Wi-Fi network runs `industrial.dot` inside the Polkadot Products host. It fetches the ESP32 endpoint every 10 seconds, parses the response, and validates both values. This implementation is in [components/LocalSensorTest.tsx](components/LocalSensorTest.tsx).
+3. **Desktop gateway** — A desktop computer on the same Wi-Fi network runs `industrial.dot` inside the Polkadot Products host. It fetches the ESP32 endpoint every second, parses the response, and validates both values. This implementation is in [components/LocalSensorTest.tsx](components/LocalSensorTest.tsx).
 
-4. **Celerity publishing** — The desktop application acts as a gateway between the local sensor network and Celerity. The Products host provides the publisher account and Statement Store allowance. A signed reading is published every 30 seconds to the `warehouse-01` topic. This implementation is in [app/page.tsx](app/page.tsx).
+4. **Celerity publishing** — The desktop application acts as a gateway between the local sensor network and Celerity. The Products host provides the publisher account and Statement Store allowance. A signed reading is published to the `warehouse-01` topic whenever the actuator nonce or state changes, and as a complete heartbeat every 10 seconds regardless. This implementation is in [app/page.tsx](app/page.tsx).
 
 5. **Remote distribution** — Celerity distributes the signed message to subscribed Products clients. Remote devices do not need to be connected to the ESP32's local Wi-Fi network.
 
@@ -176,8 +176,8 @@ For the real Statement Store host path, open the app inside the Polkadot Desktop
 ## Current behavior
 
 1. The Products host exposes a publisher account; `StatementStoreClient` connects through the host-authorized Statement Store path in `host` mode.
-2. `LocalSensorTest` polls `http://192.168.1.42/sensor.txt` every 10 seconds, parses `T=…,H=…,N=…,S=…`, and validates the environmental and optional actuator values.
-3. When a valid physical reading is available, the desktop gateway publishes it to `topic2 = warehouse-01` every 30 seconds (manual publish and an allowance-request flow are also available).
+2. `LocalSensorTest` polls `http://192.168.1.42/sensor.txt` every second, parses `T=…,H=…,N=…,S=…`, and validates the environmental and optional actuator values. The local poll is only how a change is noticed; it is not the Celerity cadence.
+3. When a valid physical reading is available, the desktop gateway publishes it to `topic2 = warehouse-01` immediately on a change of actuator nonce or state, and every 10 seconds as a heartbeat carrying the complete current state. Temperature and humidity alone do not trigger an immediate publish; they ride the heartbeat. Manual publish and an allowance-request flow are also available.
 4. Every client (desktop, Android, iPhone) subscribes to `topic2 = warehouse-01` and updates the temperature, humidity, and ESP32-reported actuator display from received statements.
 5. A signal is `LIVE` below 45 seconds, `STALE` from 45–90 seconds, and `NO SIGNAL` after 90 seconds.
 6. Up to 20 recent Celerity readings are kept in memory only.

@@ -5,44 +5,30 @@ export class DuplicateActuatorSubmissionError extends Error {
   }
 }
 
-export class StaleActuatorSubmissionError extends Error {
-  constructor() {
-    super("This actuator payment was superseded by a session reset.");
-    this.name = "StaleActuatorSubmissionError";
-  }
-}
-
+/**
+ * One payment at a time.
+ *
+ * It used to carry a reset and a generation guard, because a submission
+ * abandoned mid-signature never settled and held the lock for the life of the
+ * page. The submission is now bounded by its own timeout, so it always settles
+ * and the lock always releases — and with the manual session reset gone there
+ * is nothing left that can cancel a submission out from under this.
+ */
 export class ActuatorSubmissionLock {
   private pending = false;
-  private generation = 0;
 
   get isPending() {
     return this.pending;
   }
 
-  // Frees the lock and disowns whatever is still in flight. A submission
-  // abandoned mid-signature never settles, so without this the lock stays held
-  // for the life of the page and every later payment is refused as a duplicate.
-  reset(): void {
-    this.generation += 1;
-    this.pending = false;
-  }
-
   async run<T>(submission: () => Promise<T>): Promise<T> {
     if (this.pending) throw new DuplicateActuatorSubmissionError();
 
-    const generation = (this.generation += 1);
     this.pending = true;
     try {
-      const value = await submission();
-      // A reset while this was running means the caller has moved on; its
-      // result must not be reported as the outcome of the current attempt.
-      if (generation !== this.generation) throw new StaleActuatorSubmissionError();
-      return value;
+      return await submission();
     } finally {
-      // Only the current owner may release, or a late straggler would unlock a
-      // payment that legitimately started after the reset.
-      if (generation === this.generation) this.pending = false;
+      this.pending = false;
     }
   }
 }

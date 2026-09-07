@@ -7,7 +7,10 @@ import {
 } from "../lib/http/parseLocalSensorPayload";
 
 const SENSOR_ENDPOINT = "http://192.168.1.42/sensor.txt";
-const SENSOR_POLL_INTERVAL_MS = 10_000;
+// Local LAN polling only. It is the change-detection cadence, not the Celerity
+// cadence: an actuator pulse lasts ~60 s and a nonce step is instantaneous, so
+// both have to be noticed promptly. Publishing stays event- plus heartbeat-driven.
+const SENSOR_POLL_INTERVAL_MS = 1_000;
 const SENSOR_NAME = "Warehouse 1";
 
 // "no-reading" means the ESP32 answered normally but reported NA for the
@@ -193,7 +196,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
         >
           {status === "reading" ? "READING…" : "READ SENSOR"}
         </button>
-        <span>Desktop gateway polling is active every 10 seconds.</span>
+        <span>Desktop gateway polling is active every second.</span>
       </div>
 
       <div className="localSensorResult">
@@ -220,7 +223,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
 
         <div className="localSensorDetails">
           <div><span className="label">Source</span><code>LOCAL HTTP</code></div>
-          <div><span className="label">Polling</span><code>10 SEC</code></div>
+          <div><span className="label">Polling</span><code>1 SEC</code></div>
           <div><span className="label">Last read</span><code>{relativeTime(reading.timestamp, now)}</code></div>
           <div><span className="label">Raw</span><code>{rawResponse ?? "—"}</code></div>
         </div>

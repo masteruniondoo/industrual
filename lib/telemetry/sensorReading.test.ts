@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isSensorReading, toSensorReading } from "./sensorReading";
+import { hasImmediatePublishTrigger, isSensorReading, toSensorReading } from "./sensorReading";
 
 const base = {
   type: "env",
@@ -10,6 +10,41 @@ const base = {
 } as const;
 
 describe("Warehouse Celerity telemetry", () => {
+  // Environmental drift is continuous, so treating it as urgent would make
+  // every local poll an event. It rides along on the next heartbeat instead.
+  it.each([
+    { temperature: 28.5 },
+    { humidity: 42.2 },
+  ])("waits for the heartbeat when only temperature or humidity changes", (change) => {
+    expect(hasImmediatePublishTrigger(base, { ...base, ...change })).toBe(false);
+  });
+
+  it("does not trigger immediate publishing for a timestamp change alone", () => {
+    expect(hasImmediatePublishTrigger(base, { ...base, timestamp: base.timestamp + 10_000 })).toBe(false);
+  });
+
+  it.each([
+    [{ actuatorState: "OFF" }, { actuatorState: "ON" }],
+    [{ actuatorState: "ON" }, { actuatorState: "OFF" }],
+    [{ actuatorNonce: 18 }, { actuatorNonce: 19 }],
+    [{}, { actuatorState: "OFF" }],
+    [{ actuatorState: "OFF" }, {}],
+  ] as const)("detects actuator changes, including unknown state transitions", (previous, current) => {
+    expect(hasImmediatePublishTrigger({ ...base, ...previous }, { ...base, ...current })).toBe(true);
+  });
+
+  it("does not trigger again for an unchanged actuator state and nonce", () => {
+    const reading = { ...base, actuatorState: "ON", actuatorNonce: 19 } as const;
+    expect(
+      hasImmediatePublishTrigger(reading, {
+        ...reading,
+        temperature: 30.9,
+        humidity: 51.4,
+        timestamp: base.timestamp + 10_000,
+      }),
+    ).toBe(false);
+  });
+
   it("keeps existing environmental telemetry valid", () => {
     expect(isSensorReading(base)).toBe(true);
   });
