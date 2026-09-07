@@ -20,6 +20,7 @@ import { ActuatorPanel } from "../components/ActuatorPanel";
 import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
 import { watchCelerityConnection } from "../lib/telemetry/connectionRecovery";
 import { createSharedHostTransport } from "../lib/telemetry/sharedHostTransport";
+import { mergeLatest } from "../lib/telemetry/latestReading";
 import {
   isSensorReading,
   toSensorReading,
@@ -185,6 +186,7 @@ export default function Home() {
   // path to one, or a publish that keeps failing before it reaches the network
   // leaves the gateway with nothing driving it.
   const publishRetryAtRef = useRef(0);
+  const lastForcedRecoveryRef = useRef(Date.now());
   // Nonce, actuator state and the heartbeat clock, kept across local polls.
   const observedRef = useRef(createObservedState());
   const initialPublishAttemptRef = useRef(false);
@@ -200,13 +202,7 @@ export default function Home() {
   ) => {
     const received: EventRow = { ...reading, receivedAt, signer };
 
-    setLatest((current) => {
-      if (current && current.timestamp > received.timestamp) return current;
-      if (current?.timestamp === received.timestamp) {
-        return { ...received, receivedAt: current.receivedAt, signer: signer ?? current.signer };
-      }
-      return received;
-    });
+    setLatest((current) => mergeLatest(current, received));
 
     setEvents((current) => {
       const existing = current.find(
@@ -550,6 +546,32 @@ export default function Home() {
 
     void publishCurrentReading(decision.reason);
   }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading, now]);
+
+  // Supervisor, and deliberately not a diagnosis.
+  //
+  // A successful publish is the only thing that refreshes this device's own
+  // view of the signal, so when publishing stops while everything it depends on
+  // still looks healthy - connected, armed, a current reading - nothing else
+  // notices and the page sits at NO SIGNAL until someone reloads it. Rather
+  // than enumerate the ways that can happen, reopen the heartbeat window and
+  // let the ordinary path try again. Once every three intervals, so a host that
+  // is genuinely refusing is not hammered.
+  useEffect(() => {
+    if (
+      !autoPublish ||
+      connection !== "connected" ||
+      !physicalReading ||
+      !physicalReadingIsCurrentRef.current
+    ) return;
+
+    const quietSince = Math.max(lastPublishAt ?? 0, lastForcedRecoveryRef.current);
+    if (now - quietSince < HEARTBEAT_INTERVAL_MS * 3) return;
+
+    lastForcedRecoveryRef.current = now;
+    observedRef.current.lastHeartbeatAt = undefined;
+    publishRetryAtRef.current = 0;
+    updateDiagnostic("publish", "NO PUBLISH IN 30s — REOPENING THE HEARTBEAT");
+  }, [autoPublish, connection, physicalReading, lastPublishAt, now, updateDiagnostic]);
 
   function toggleAutoPublish() {
     if (autoPublish) {
