@@ -58,6 +58,9 @@ h2 { margin: 5px 0 0; font-size: 23px; letter-spacing: -.025em; }
 
 .primaryButton { min-height: 44px; border: 1px solid var(--good); border-radius: 10px; padding: 0 18px; background: rgba(126,240,184,.1); color: var(--good); font-weight: 800; letter-spacing: .04em; cursor: pointer; }
 .primaryButton:disabled { border-color: var(--line); background: transparent; color: var(--muted); cursor: not-allowed; }
+.secondaryButton { min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 0 18px; background: transparent; color: var(--muted); font-weight: 700; letter-spacing: .04em; cursor: pointer; }
+.secondaryButton:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+.secondaryButton:disabled { opacity: .55; cursor: not-allowed; }
 
 .localSensorPanel { padding: 24px; }
 .localSensorEndpoint { display: grid; gap: 7px; margin-top: 22px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: rgba(0,0,0,.14); }
@@ -134,6 +137,6 @@ footer { color: var(--muted); text-align: center; font-size: 12px; margin-top: 1
   .localSensorMetrics { grid-template-columns: 1fr; }
   .heroActuator, .localActuatorState, .actuatorSummary, .actuatorEvidence { grid-template-columns: 1fr; }
   .actuatorAction { align-items: stretch; flex-direction: column; }
-  .actuatorAction .primaryButton { width: 100%; min-width: 0; }
+  .actuatorAction .primaryButton, .actuatorAction .secondaryButton { width: 100%; min-width: 0; }
   .localSensorDetails > div { grid-template-columns: 1fr; gap: 5px; }
 }

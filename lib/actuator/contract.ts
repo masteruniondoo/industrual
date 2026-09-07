@@ -23,11 +23,16 @@ import {
 } from "./config";
 import { ActuatorSubmissionLock } from "./submissionLock";
 
+export { StaleActuatorSubmissionError } from "./submissionLock";
+
 const CONNECTION_TIMEOUT_MS = 30_000;
 const READ_TIMEOUT_MS = 60_000;
 const MAPPING_TIMEOUT_MS = 90_000;
 const ALLOWANCE_TIMEOUT_MS = 60_000;
 const TRANSACTION_TIMEOUT_MS = 120_000;
+// Outer bound on the whole submission, above the SDK's own timeout so its more
+// specific error wins whenever it fires. This only catches a wedged host call.
+const SUBMISSION_TIMEOUT_MS = TRANSACTION_TIMEOUT_MS + 30_000;
 const DOT_NS_IDENTIFIER = "industrial.dot";
 const PUBLIC_ASSET_HUB_URL = "wss://asset-hub-paseo-rpc.n.dwellir.com";
 const PUBLIC_READ_ORIGIN = "5Ckonvibt6UtXAoGb5jQycH96xUscfMGzTcuYAJxou48pAN2";
@@ -191,6 +196,35 @@ export function isActuatorContractConfigured() {
   return ACTUATOR_CONTRACT_ADDRESS !== null;
 }
 
+// Cached state that must not outlive a single payment attempt. A websocket dies
+// quietly while the app is backgrounded or the device changes network, and a
+// signing permission granted to an earlier host session says nothing about the
+// current one. Reusing either is what leaves the flow wedged.
+function clearCachedChainState() {
+  contextPromise = null;
+  chainSubmitPermissionVerified = false;
+}
+
+// Full teardown behind the panel's reset control: everything a payment clears,
+// plus the standalone read socket, the remembered account, and a submission
+// lock still held by an attempt that was abandoned and will never settle.
+export async function resetActuatorSession(): Promise<void> {
+  submissionLock.reset();
+  clearCachedChainState();
+  connectedAccountAddress = null;
+
+  const publicRead = publicReadContextPromise;
+  publicReadContextPromise = null;
+  if (!publicRead) return;
+
+  try {
+    const { client } = await publicRead;
+    client.destroy();
+  } catch {
+    // A context that never resolved has no socket left to close.
+  }
+}
+
 async function getPublicReadContext() {
   publicReadContextPromise ??= (async () => {
     const client = createClient(getWsProvider(PUBLIC_ASSET_HUB_URL));
@@ -220,6 +254,10 @@ export async function readPublicTriggerNonce(): Promise<bigint> {
 }
 
 export async function connectActuatorWallet(): Promise<string> {
+  // Connecting is also the way out of a wedged session, so it must not build on
+  // whatever the previous attempt left cached.
+  clearCachedChainState();
+
   const connected = await withTimeout(
     signerManager.connect("host"),
     CONNECTION_TIMEOUT_MS,
@@ -269,11 +307,19 @@ export async function triggerActuator(
   onStatus?: (status: ActuatorTransactionStatus) => void,
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
+    // Every payment starts from a clean slate, as required: no chain context
+    // inherited from an attempt that may have been abandoned on another device,
+    // and no assumption that signing permission is still granted.
+    clearCachedChainState();
+
     const { contract, runtime } = await getContext();
     const account = signerManager
       .getState()
       .accounts.find((candidate) => candidate.address === connectedAccountAddress);
     if (!account) {
+      // The host session changed under us. Forget the address so the panel can
+      // fall back to "connect wallet" instead of retrying against a dead one.
+      connectedAccountAddress = null;
       throw new Error("Connect the wallet before paying.");
     }
 
@@ -292,14 +338,28 @@ export async function triggerActuator(
     );
     if (!mapping.ok) throw mapping.error;
 
-    const result = await contract.trigger.tx({
-      origin: account.address,
-      signer,
-      value: ACTUATOR_PRICE_NATIVE,
-      waitFor: "finalized",
-      timeoutMs: TRANSACTION_TIMEOUT_MS,
-      onStatus: (status: TxStatus) => onStatus?.(status),
-    });
+    // The SDK takes its own timeout, but an abandoned signature can leave the
+    // host request itself outstanding, so bound the whole call as well. Without
+    // this the promise never settles and the lock is held for the life of the
+    // page. The outer bound is deliberately looser so the SDK's own timeout,
+    // which reports far better detail, wins in every normal failure.
+    let result;
+    try {
+      result = await withTimeout(
+        contract.trigger.tx({
+          origin: account.address,
+          signer,
+          value: ACTUATOR_PRICE_NATIVE,
+          waitFor: "finalized",
+          timeoutMs: TRANSACTION_TIMEOUT_MS,
+          onStatus: (status: TxStatus) => onStatus?.(status),
+        }),
+        SUBMISSION_TIMEOUT_MS,
+        "payment submission",
+      );
+    } catch (error) {
+      throw asActivationError(error);
+    }
     if (!result.ok) throw asActivationError(result.error);
 
     onStatus?.("finalized");
