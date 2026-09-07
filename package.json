@@ -1,6 +1,6 @@
 {
     "name": "industrial-sensor",
-    "version": "0.11.16",
+    "version": "0.11.17",
     "private": true,
     "engines": {
         "node": ">=22"

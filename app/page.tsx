@@ -21,6 +21,7 @@ import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
 import { watchCelerityConnection } from "../lib/telemetry/connectionRecovery";
 import { createSharedHostTransport } from "../lib/telemetry/sharedHostTransport";
 import { mergeLatest } from "../lib/telemetry/latestReading";
+import { decideRecovery } from "../lib/telemetry/gatewayRecovery";
 import {
   isSensorReading,
   toSensorReading,
@@ -59,6 +60,13 @@ type AllowanceState =
   | "unverified"
   | "implicit"
   | "error";
+
+// The states in which the host will accept a publish. "assumed" is the start of
+// a session, "allocated" a granted request, "implicit" an allowance proven by a
+// publish the host already accepted. Everything else needs the operator.
+function canPublishUnderAllowance(allowance: AllowanceState): boolean {
+  return allowance === "assumed" || allowance === "allocated" || allowance === "implicit";
+}
 
 type DiagnosticState = {
   host: string;
@@ -187,6 +195,10 @@ export default function Home() {
   // leaves the gateway with nothing driving it.
   const publishRetryAtRef = useRef(0);
   const lastForcedRecoveryRef = useRef(Date.now());
+  // Auto publish being off is only meaningful if the operator chose it. Off
+  // because it was never armed, or because a reconnect lost it, is a fault the
+  // gateway has to repair by itself.
+  const autoPublishOffByOperatorRef = useRef(false);
   // Nonce, actuator state and the heartbeat clock, kept across local polls.
   const observedRef = useRef(createObservedState());
   const initialPublishAttemptRef = useRef(false);
@@ -508,7 +520,7 @@ export default function Home() {
   useEffect(() => {
     if (
       initialPublishAttemptRef.current ||
-      allowance !== "assumed" ||
+      !canPublishUnderAllowance(allowance) ||
       connection !== "connected" ||
       !physicalReading
     ) {
@@ -557,27 +569,38 @@ export default function Home() {
   // let the ordinary path try again. Once every three intervals, so a host that
   // is genuinely refusing is not hammered.
   useEffect(() => {
-    if (
-      !autoPublish ||
-      connection !== "connected" ||
-      !physicalReading ||
-      !physicalReadingIsCurrentRef.current
-    ) return;
-
-    const quietSince = Math.max(lastPublishAt ?? 0, lastForcedRecoveryRef.current);
-    if (now - quietSince < HEARTBEAT_INTERVAL_MS * 3) return;
+    const recovery = decideRecovery({
+      connected: connection === "connected",
+      hasCurrentReading: Boolean(physicalReading) && physicalReadingIsCurrentRef.current,
+      allowedByHost: canPublishUnderAllowance(allowance),
+      autoPublish,
+      offByOperator: autoPublishOffByOperatorRef.current,
+      lastPublishAt,
+      lastRecoveryAt: lastForcedRecoveryRef.current,
+      now,
+    });
+    if (recovery === "none") return;
 
     lastForcedRecoveryRef.current = now;
     observedRef.current.lastHeartbeatAt = undefined;
     publishRetryAtRef.current = 0;
+
+    if (recovery === "rearm") {
+      initialPublishAttemptRef.current = true;
+      setAutoPublish(true);
+      updateDiagnostic("publish", "AUTO PUBLISH WAS OFF — RE-ARMED");
+      return;
+    }
     updateDiagnostic("publish", "NO PUBLISH IN 30s — REOPENING THE HEARTBEAT");
-  }, [autoPublish, connection, physicalReading, lastPublishAt, now, updateDiagnostic]);
+  }, [autoPublish, allowance, connection, physicalReading, lastPublishAt, now, updateDiagnostic]);
 
   function toggleAutoPublish() {
     if (autoPublish) {
+      autoPublishOffByOperatorRef.current = true;
       setAutoPublish(false);
       return;
     }
+    autoPublishOffByOperatorRef.current = false;
     if (connection !== "connected") {
       const message = "ENABLE FAILED: STATEMENT STORE NOT CONNECTED";
       setLastPublishResult(message);
@@ -590,11 +613,7 @@ export default function Home() {
       updateDiagnostic("publish", message);
       return;
     }
-    if (
-      allowance !== "assumed" &&
-      allowance !== "allocated" &&
-      allowance !== "implicit"
-    ) {
+    if (!canPublishUnderAllowance(allowance)) {
       const message = "ENABLE CELERITY BEFORE AUTO PUBLISH";
       setLastPublishResult(message);
       updateDiagnostic("publish", message);
