@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { sensorRequest } from "../lib/http/sensorRequest";
 import {
   parseLocalSensorPayload,
   type HttpSensorReading,
@@ -73,6 +74,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
   const [status, setStatus] = useState<LocalSensorStatus>("idle");
   const [reading, setReading] = useState<HttpSensorReading | null>(null);
   const [rawResponse, setRawResponse] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const callbacksRef = useRef({ onReading, onStatusChange });
   const inFlightRef = useRef(false);
@@ -92,18 +94,16 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
     }
 
     try {
-      const response = await fetch(SENSOR_ENDPOINT, {
-        cache: "no-store",
+      const text = await sensorRequest(async (signal) => {
+        const response = await fetch(SENSOR_ENDPOINT, { cache: "no-store", signal });
+        if (!response.ok) {
+          throw new LocalSensorDiagnosticError(
+            "HTTP ERROR",
+            `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
+          );
+        }
+        return response.text();
       });
-
-      if (!response.ok) {
-        throw new LocalSensorDiagnosticError(
-          "HTTP ERROR",
-          `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
-        );
-      }
-
-      const text = await response.text();
       const parsed = parseLocalSensorPayload(text);
 
       if (!parsed.ok) {
@@ -111,6 +111,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
         // is a device state, not a gateway failure.
         if (parsed.reason === "no-reading") {
           if (!mountedRef.current) return;
+          setLastError(null);
           setRawResponse(text);
           setStatus("no-reading");
           callbacksRef.current.onStatusChange?.("no-reading", `NO READING: ${parsed.error}`);
@@ -121,6 +122,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
       }
 
       if (!mountedRef.current) return;
+      setLastError(null);
       setRawResponse(text);
       setNow(parsed.value.timestamp);
       setReading(parsed.value);
@@ -132,6 +134,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
       if (!mountedRef.current) return;
 
       const described = describeFailure(error);
+      setLastError(described.message);
       setStatus("error");
       callbacksRef.current.onStatusChange?.(
         "error",
@@ -159,14 +162,9 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
     };
   }, [readSensor]);
 
-  // Keep probing in the background, but expose the local controls only while
-  // the endpoint has a current, valid reading.
-  if (
-    reading === null ||
-    (status !== "online" && status !== "reading" && status !== "no-reading")
-  ) {
-    return null;
-  }
+  // Once discovered, keep this panel visible during outages so the last
+  // successful read and the HTTP failure can be distinguished from Celerity.
+  if (reading === null) return null;
 
   const statusClass = status === "online" ? "status-live" : "status-connecting";
 
@@ -179,7 +177,7 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
         </div>
         <div className={`status ${statusClass}`}>
           <span className="dot" />
-          {status.toUpperCase()}
+          {lastError ? "RECONNECTING" : status.toUpperCase()}
         </div>
       </div>
 
@@ -213,8 +211,9 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
 
         <div className="localSensorOnline">
           <span className="dot" />
-          {status === "no-reading" ? "SENSOR ONLINE · NO CURRENT READING" : "SENSOR ONLINE"}
+          {lastError ? "SENSOR UNREACHABLE · RETRYING AUTOMATICALLY" : status === "no-reading" ? "SENSOR ONLINE · NO CURRENT READING" : "SENSOR ONLINE"}
         </div>
+        {lastError ? <p role="status">{lastError}. Values shown are from the last successful read.</p> : null}
 
         <div className="localActuatorState">
           <div><span>ACTUATOR-01 state</span><strong className={reading.actuatorState === "ON" ? "actuatorOn" : "actuatorOff"}>{reading.actuatorState ?? "—"}</strong></div>

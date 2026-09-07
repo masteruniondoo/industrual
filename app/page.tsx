@@ -181,6 +181,10 @@ export default function Home() {
   // value the ESP32 no longer stands behind would show stale data as LIVE.
   const physicalReadingIsCurrentRef = useRef(false);
   const publishInFlightRef = useRef(false);
+  // Backoff only. It delays the next attempt; it must never become the sole
+  // path to one, or a publish that keeps failing before it reaches the network
+  // leaves the gateway with nothing driving it.
+  const publishRetryAtRef = useRef(0);
   // Nonce, actuator state and the heartbeat clock, kept across local polls.
   const observedRef = useRef(createObservedState());
   const initialPublishAttemptRef = useRef(false);
@@ -234,7 +238,9 @@ export default function Home() {
   }, []);
 
   const handleSensorStatus = useCallback((status: LocalSensorStatus, detail: string) => {
-    updateDiagnostic("sensorHttp", detail);
+    // Preserve the last outcome during a retry instead of hiding the failure
+    // behind a transient READING label every second.
+    if (status !== "reading") updateDiagnostic("sensorHttp", detail);
 
     // A sensor that has nothing to report, or that dropped off the network,
     // pauses publishing; it does not end it. Auto publish stays armed so the
@@ -245,7 +251,8 @@ export default function Home() {
 
     if (status === "error") {
       physicalReadingRef.current = null;
-      setPhysicalReading(null);
+      // Keep the gateway diagnostics visible with the last known reading.
+      // The current-reading flag and ref above still block stale publishing.
     }
   }, [updateDiagnostic]);
 
@@ -470,6 +477,7 @@ export default function Home() {
       if (!result.ok) throw result.error;
 
       const acceptedAt = Date.now();
+      publishRetryAtRef.current = 0;
       console.info("[industrial] Statement Store publish accepted", { trigger, reading });
       setLastPublishAt(acceptedAt);
       setLastPublishResult("ACCEPTED");
@@ -489,9 +497,11 @@ export default function Home() {
           ? "not-requested"
           : currentAllowance,
       );
-      // A transient submission failure must not permanently stop the gateway.
-      // Missing allowance requires user action; other failures retry next tick.
-      if (isMissingAllowanceError(message)) setAutoPublish(false);
+      // Keep the user's auto-publish choice armed, including while the host
+      // restores allowance, and back off before trying again. The retry itself
+      // is the ordinary heartbeat: decidePublish already adopted this snapshot,
+      // so the next heartbeat carries the same complete state within 10s.
+      publishRetryAtRef.current = Date.now() + HEARTBEAT_INTERVAL_MS;
       return false;
     } finally {
       publishInFlightRef.current = false;
@@ -525,7 +535,9 @@ export default function Home() {
       connection !== "connected" ||
       publishing ||
       !physicalReading ||
-      !physicalReadingIsCurrentRef.current
+      !physicalReadingIsCurrentRef.current ||
+      Date.now() - physicalReading.timestamp >= LIVE_UNTIL_MS ||
+      Date.now() < publishRetryAtRef.current
     ) return;
 
     const decision = decidePublish(
@@ -537,7 +549,7 @@ export default function Home() {
     if (!decision.publish) return;
 
     void publishCurrentReading(decision.reason);
-  }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading]);
+  }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading, now]);
 
   function toggleAutoPublish() {
     if (autoPublish) {
@@ -658,10 +670,10 @@ export default function Home() {
             onClick={toggleAutoPublish}
             aria-pressed={autoPublish}
             disabled={
-              connection !== "connected" ||
+              !autoPublish && (connection !== "connected" ||
               (allowance !== "assumed" &&
                 allowance !== "allocated" &&
-                allowance !== "implicit")
+                allowance !== "implicit"))
             }
           >
             AUTO PUBLISH · {autoPublish ? "ON" : "OFF"}
@@ -679,7 +691,7 @@ export default function Home() {
           <div><span>Allowance</span><strong>{allowanceLabel(allowance)}</strong></div>
           <div><span>Host mode</span><strong>{connection === "connected" ? "CONNECTED" : connection.toUpperCase()}</strong></div>
           <div><span>Auto publish</span><strong>{autoPublish ? "ON" : "OFF"}</strong></div>
-          <div><span>Publish interval</span><strong>30 SEC</strong></div>
+          <div><span>Publish interval</span><strong>{HEARTBEAT_INTERVAL_MS / 1_000} SEC</strong></div>
           <div><span>Last physical reading</span><strong>{ageLabel(physicalReading?.timestamp ?? null, now)}</strong></div>
           <div><span>Last Celerity publish</span><strong>{ageLabel(lastPublishAt, now)}</strong></div>
           <div className="gatewayResult"><span>Result</span><strong>{lastPublishResult}</strong></div>
