@@ -16,16 +16,18 @@ export type SensorReading = {
 export function isSensorReading(value: unknown): value is SensorReading {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
-  const hasActuatorNonce = row.actuatorNonce !== undefined;
-  const hasActuatorState = row.actuatorState !== undefined;
-  const validActuator =
-    (!hasActuatorNonce && !hasActuatorState) ||
-    (hasActuatorNonce &&
-      hasActuatorState &&
-      typeof row.actuatorNonce === "number" &&
+  // The two actuator fields are independent evidence. A device that has not yet
+  // verified a trigger nonce still knows its own GPIO state, so a reading may
+  // carry either field alone. Absent stays absent and is never inferred.
+  const validActuatorNonce =
+    row.actuatorNonce === undefined ||
+    (typeof row.actuatorNonce === "number" &&
       Number.isSafeInteger(row.actuatorNonce) &&
-      row.actuatorNonce >= 0 &&
-      (row.actuatorState === "ON" || row.actuatorState === "OFF"));
+      row.actuatorNonce >= 0);
+  const validActuatorState =
+    row.actuatorState === undefined ||
+    row.actuatorState === "ON" ||
+    row.actuatorState === "OFF";
 
   return (
     row.type === "env" &&
@@ -36,7 +38,8 @@ export function isSensorReading(value: unknown): value is SensorReading {
     Number.isFinite(row.humidity) &&
     typeof row.timestamp === "number" &&
     Number.isFinite(row.timestamp) &&
-    validActuator
+    validActuatorNonce &&
+    validActuatorState
   );
 }
 

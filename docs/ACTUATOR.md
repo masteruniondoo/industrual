@@ -114,6 +114,16 @@ T=29.0,H=30.8,N=18,S=OFF
 During migration, the application also accepts the original `T,H` response.
 Missing actuator fields remain unknown and are never fabricated.
 
+The device never drops a field: it writes the literal `NA` for any value it does
+not have, and the four-field structure is fixed. The gateway therefore reads
+`NA` as unknown, per field and independently:
+
+- `N=NA` with a real `S` is the normal state after a restart, until warp sync
+  and proof verification produce a verified nonce. The GPIO state is still
+  genuine physical evidence and is reported.
+- `T=NA` / `H=NA` mean the DHT11 has no current value. That cycle is skipped
+  rather than published, and it does not disarm the gateway's auto publish.
+
 The Celerity payload is derived only from the ESP32 response:
 
 ```json

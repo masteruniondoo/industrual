@@ -18,11 +18,21 @@ describe("Warehouse Celerity telemetry", () => {
     expect(isSensorReading({ ...base, actuatorNonce: 18, actuatorState })).toBe(true);
   });
 
+  // Either field may stand alone: an ESP32 that has not verified a nonce yet
+  // still reports the GPIO state it is actually driving.
   it.each([
     { ...base, actuatorNonce: 18 },
     { ...base, actuatorState: "ON" },
+    { ...base, actuatorState: "OFF" },
+  ])("accepts partial actuator evidence", (reading) => {
+    expect(isSensorReading(reading)).toBe(true);
+  });
+
+  it.each([
     { ...base, actuatorNonce: 18, actuatorState: "ACTIVE" },
     { ...base, actuatorNonce: -1, actuatorState: "OFF" },
+    { ...base, actuatorNonce: 1.5, actuatorState: "OFF" },
+    { ...base, actuatorNonce: "18", actuatorState: "ON" },
   ])("rejects invalid actuator telemetry", (reading) => {
     expect(isSensorReading(reading)).toBe(false);
   });

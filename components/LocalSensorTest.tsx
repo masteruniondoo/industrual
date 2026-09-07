@@ -10,7 +10,9 @@ const SENSOR_ENDPOINT = "http://192.168.1.42/sensor.txt";
 const SENSOR_POLL_INTERVAL_MS = 10_000;
 const SENSOR_NAME = "Warehouse 1";
 
-export type LocalSensorStatus = "idle" | "reading" | "online" | "error";
+// "no-reading" means the ESP32 answered normally but reported NA for the
+// environmental values. The device is online; only this cycle has no data.
+export type LocalSensorStatus = "idle" | "reading" | "online" | "no-reading" | "error";
 
 type RequestFailure = {
   category: string;
@@ -102,6 +104,16 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
       const parsed = parseLocalSensorPayload(text);
 
       if (!parsed.ok) {
+        // Keep the last known reading on screen and keep polling: an NA cycle
+        // is a device state, not a gateway failure.
+        if (parsed.reason === "no-reading") {
+          if (!mountedRef.current) return;
+          setRawResponse(text);
+          setStatus("no-reading");
+          callbacksRef.current.onStatusChange?.("no-reading", `NO READING: ${parsed.error}`);
+          return;
+        }
+
         throw new LocalSensorDiagnosticError("INVALID PAYLOAD", parsed.error);
       }
 
@@ -146,7 +158,10 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
 
   // Keep probing in the background, but expose the local controls only while
   // the endpoint has a current, valid reading.
-  if (reading === null || (status !== "online" && status !== "reading")) {
+  if (
+    reading === null ||
+    (status !== "online" && status !== "reading" && status !== "no-reading")
+  ) {
     return null;
   }
 
@@ -194,7 +209,8 @@ export function LocalSensorTest({ onReading, onStatusChange }: LocalSensorTestPr
         </div>
 
         <div className="localSensorOnline">
-          <span className="dot" /> SENSOR ONLINE
+          <span className="dot" />
+          {status === "no-reading" ? "SENSOR ONLINE · NO CURRENT READING" : "SENSOR ONLINE"}
         </div>
 
         <div className="localActuatorState">

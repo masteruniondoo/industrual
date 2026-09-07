@@ -71,6 +71,18 @@ and Celerity messages without actuator fields remain supported. Missing
 physical actuator data is displayed as unknown and is never inferred from the
 contract.
 
+The firmware keeps the four-field structure at all times and writes the literal
+`NA` for any value it does not have, so the gateway treats `NA` as unknown
+rather than as a protocol error:
+
+- `N=NA` — the device has not verified a trigger nonce yet (normal until warp
+  sync and proof verification finish after a restart). `S` is still reported,
+  because the device knows the GPIO state it is driving.
+- `S=NA` — actuator state unknown; it is left unknown, never inferred.
+- `T=NA` or `H=NA` — the DHT11 read failed or went stale. There is nothing to
+  publish that cycle, so the gateway skips it and keeps polling; auto publish
+  stays armed and resumes on the next valid reading.
+
 ## Actuator
 
 The additive actuator demo introduces the CDM package

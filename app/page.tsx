@@ -181,6 +181,9 @@ export default function Home() {
   });
   const clientRef = useRef<StatementStoreClient | null>(null);
   const physicalReadingRef = useRef<HttpSensorReading | null>(null);
+  // The receiver ages a statement from its arrival time, so republishing a
+  // value the ESP32 no longer stands behind would show stale data as LIVE.
+  const physicalReadingIsCurrentRef = useRef(false);
   const publishInFlightRef = useRef(false);
   const initialPublishAttemptRef = useRef(false);
 
@@ -228,16 +231,23 @@ export default function Home() {
 
   const handlePhysicalReading = useCallback((reading: HttpSensorReading) => {
     physicalReadingRef.current = reading;
+    physicalReadingIsCurrentRef.current = true;
     setPhysicalReading(reading);
   }, []);
 
   const handleSensorStatus = useCallback((status: LocalSensorStatus, detail: string) => {
     updateDiagnostic("sensorHttp", detail);
 
+    // A sensor that has nothing to report, or that dropped off the network,
+    // pauses publishing; it does not end it. Auto publish stays armed so the
+    // gateway resumes on its own once a fresh reading arrives.
+    if (status === "no-reading" || status === "error") {
+      physicalReadingIsCurrentRef.current = false;
+    }
+
     if (status === "error") {
       physicalReadingRef.current = null;
       setPhysicalReading(null);
-      setAutoPublish(false);
     }
   }, [updateDiagnostic]);
 
@@ -393,6 +403,7 @@ export default function Home() {
     }
     if (
       !current ||
+      !physicalReadingIsCurrentRef.current ||
       !Number.isFinite(current.temperature) ||
       !Number.isFinite(current.humidity) ||
       !Number.isFinite(current.timestamp)
