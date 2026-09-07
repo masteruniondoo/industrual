@@ -61,11 +61,13 @@ type AllowanceState =
   | "implicit"
   | "error";
 
-// The states in which the host will accept a publish. "assumed" is the start of
-// a session, "allocated" a granted request, "implicit" an allowance proven by a
-// publish the host already accepted. Everything else needs the operator.
-function canPublishUnderAllowance(allowance: AllowanceState): boolean {
-  return allowance === "assumed" || allowance === "allocated" || allowance === "implicit";
+// The only allowance states the host itself declared: it answered an allocation
+// request with "Rejected" or "NotAvailable". Every other state is either a
+// positive ("assumed", "allocated", "implicit") or the app not knowing - and the
+// app's guesses have proven wrong, so they must not block a publish attempt.
+// One publish settles the question for real.
+function isAllowanceRefused(allowance: AllowanceState): boolean {
+  return allowance === "rejected" || allowance === "not-available";
 }
 
 type DiagnosticState = {
@@ -500,11 +502,12 @@ export default function Home() {
       console.error("[industrial] Statement Store publish failed", error);
       setLastPublishResult(message);
       updateDiagnostic("publish", `ERROR: ${message}`);
-      setAllowance((currentAllowance) =>
-        currentAllowance === "assumed" || isMissingAllowanceError(message)
-          ? "not-requested"
-          : currentAllowance,
-      );
+      // Only an error that actually names the allowance says anything about
+      // it. Demoting on any failure - a timeout, a moment without a socket -
+      // was enough to convince the app the host would refuse, which then
+      // blocked arming, blocked recovery and disabled the auto-publish control,
+      // while a manual publish went through and proved the belief wrong.
+      if (isMissingAllowanceError(message)) setAllowance("not-requested");
       // Keep the user's auto-publish choice armed, including while the host
       // restores allowance, and back off before trying again. The retry itself
       // is the ordinary heartbeat: decidePublish already adopted this snapshot,
@@ -520,7 +523,7 @@ export default function Home() {
   useEffect(() => {
     if (
       initialPublishAttemptRef.current ||
-      !canPublishUnderAllowance(allowance) ||
+      isAllowanceRefused(allowance) ||
       connection !== "connected" ||
       !physicalReading
     ) {
@@ -572,7 +575,7 @@ export default function Home() {
     const recovery = decideRecovery({
       connected: connection === "connected",
       hasCurrentReading: Boolean(physicalReading) && physicalReadingIsCurrentRef.current,
-      allowedByHost: canPublishUnderAllowance(allowance),
+      allowanceRefused: isAllowanceRefused(allowance),
       autoPublish,
       offByOperator: autoPublishOffByOperatorRef.current,
       lastPublishAt,
@@ -613,7 +616,7 @@ export default function Home() {
       updateDiagnostic("publish", message);
       return;
     }
-    if (!canPublishUnderAllowance(allowance)) {
+    if (isAllowanceRefused(allowance)) {
       const message = "ENABLE CELERITY BEFORE AUTO PUBLISH";
       setLastPublishResult(message);
       updateDiagnostic("publish", message);
@@ -711,10 +714,7 @@ export default function Home() {
             onClick={toggleAutoPublish}
             aria-pressed={autoPublish}
             disabled={
-              !autoPublish && (connection !== "connected" ||
-              (allowance !== "assumed" &&
-                allowance !== "allocated" &&
-                allowance !== "implicit"))
+              !autoPublish && (connection !== "connected" || isAllowanceRefused(allowance))
             }
           >
             AUTO PUBLISH · {autoPublish ? "ON" : "OFF"}

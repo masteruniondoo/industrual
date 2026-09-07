@@ -3,8 +3,12 @@ export type GatewayHealth = {
   connected: boolean;
   /** A physical reading exists and the device still stands behind it. */
   hasCurrentReading: boolean;
-  /** The host would accept a publish right now. */
-  allowedByHost: boolean;
+  /**
+   * The host has actually refused the allowance - it answered "Rejected" or
+   * "NotAvailable". Anything else, including a state the app arrived at by
+   * guessing, counts as unknown: recovery finds out by publishing.
+   */
+  allowanceRefused: boolean;
   /** Auto publish is on. */
   autoPublish: boolean;
   /** The operator switched auto publish off deliberately. */
@@ -40,13 +44,16 @@ export const RECOVERY_AFTER_MS = 30_000;
  * hold while publishing is not happening.
  *
  * The one silence it will not break is the operator's. Auto publish switched off
- * by hand stays off.
+ * by hand stays off, as is a refusal the host actually stated. What it will not
+ * defer to is the app's own guess about the allowance: a publish failing for an
+ * unrelated reason once demoted that guess, which then blocked every route back
+ * - while a manual publish still went through.
  */
 export function decideRecovery(
   health: GatewayHealth,
   afterMs: number = RECOVERY_AFTER_MS,
 ): GatewayRecovery {
-  if (!health.connected || !health.hasCurrentReading || !health.allowedByHost) return "none";
+  if (!health.connected || !health.hasCurrentReading || health.allowanceRefused) return "none";
   if (health.offByOperator) return "none";
 
   const quietSince = Math.max(health.lastPublishAt ?? 0, health.lastRecoveryAt);

@@ -7,7 +7,7 @@ const T0 = 1_788_460_000_000;
 const healthy: GatewayHealth = {
   connected: true,
   hasCurrentReading: true,
-  allowedByHost: true,
+  allowanceRefused: false,
   autoPublish: true,
   offByOperator: false,
   lastPublishAt: T0,
@@ -47,9 +47,18 @@ describe("gateway self-recovery", () => {
   it.each([
     ["disconnected", { connected: false }],
     ["no current reading", { hasCurrentReading: false }],
-    ["allowance withheld", { allowedByHost: false }],
+    ["the host refused the allowance", { allowanceRefused: true }],
   ])("does not act when %s, because publishing could not succeed anyway", (_label, broken) => {
     expect(decideRecovery(after(300, broken))).toBe("none");
+  });
+
+  // The third reported occurrence. A publish failed for an unrelated reason,
+  // the app demoted its own allowance guess, and that guess then blocked
+  // arming, blocked recovery and disabled the auto-publish control - while a
+  // manual publish went straight through and proved the host had no objection.
+  // Only a refusal the host actually stated may stop recovery.
+  it("does not defer to the app's own guess that the allowance is gone", () => {
+    expect(decideRecovery(after(30, { autoPublish: false, allowanceRefused: false }))).toBe("rearm");
   });
 
   it("waits again after acting, so it cannot fire every tick", () => {
