@@ -1,4 +1,6 @@
 import { getChainAPI } from "@parity/product-sdk-chain-client";
+import { createClient } from "polkadot-api";
+import { getWsProvider } from "polkadot-api/ws";
 import {
   createContractRuntimeFromClient,
   ensureContractAccountMapped,
@@ -27,12 +29,29 @@ const MAPPING_TIMEOUT_MS = 90_000;
 const ALLOWANCE_TIMEOUT_MS = 60_000;
 const TRANSACTION_TIMEOUT_MS = 120_000;
 const DOT_NS_IDENTIFIER = "industrial.dot";
+const PUBLIC_ASSET_HUB_URL = "wss://asset-hub-paseo-rpc.n.dwellir.com";
+const PUBLIC_READ_ORIGIN = "5Ckonvibt6UtXAoGb5jQycH96xUscfMGzTcuYAJxou48pAN2";
 const submissionLock = new ActuatorSubmissionLock();
 
 type ActuatorContext = Awaited<ReturnType<typeof createContext>>;
 let contextPromise: Promise<ActuatorContext> | null = null;
 let connectedAccountAddress: string | null = null;
 let chainSubmitPermissionVerified = false;
+let publicReadContextPromise: Promise<{
+  contract: Awaited<ReturnType<typeof createContext>>["contract"];
+  client: ReturnType<typeof createClient>;
+}> | null = null;
+
+const signerManager = new SignerManager({
+  dappName: "industrial.dot",
+  createProvider: (type) =>
+    type === "host"
+      ? new HostProvider({
+          dappName: "industrial.dot",
+          requestChainSubmitPermission: false,
+        })
+      : new DevProvider(),
+});
 
 export type ActuatorTransactionStatus =
   | "connecting"
@@ -143,16 +162,6 @@ async function ensureSmartContractAllowance(address: string) {
 
 async function createContext() {
   const address = requireContractAddress();
-  const signerManager = new SignerManager({
-    dappName: "industrial.dot",
-    createProvider: (type) =>
-      type === "host"
-        ? new HostProvider({
-            dappName: "industrial.dot",
-            requestChainSubmitPermission: false,
-          })
-        : new DevProvider(),
-  });
   const chain = await withTimeout(
     getChainAPI("devnet"),
     CONNECTION_TIMEOUT_MS,
@@ -182,8 +191,35 @@ export function isActuatorContractConfigured() {
   return ACTUATOR_CONTRACT_ADDRESS !== null;
 }
 
+async function getPublicReadContext() {
+  publicReadContextPromise ??= (async () => {
+    const client = createClient(getWsProvider(PUBLIC_ASSET_HUB_URL));
+    const runtime = createContractRuntimeFromClient(client, devnet_asset_hub, {
+      at: "finalized",
+    });
+    const contract = createContract(runtime, requireContractAddress(), ACTUATOR_ABI);
+    return { contract, client };
+  })().catch((error) => {
+    publicReadContextPromise = null;
+    throw error;
+  });
+  return publicReadContextPromise;
+}
+
+export async function readPublicTriggerNonce(): Promise<bigint> {
+  const { contract } = await getPublicReadContext();
+  const result = await withTimeout(
+    contract.triggerNonce.query({ origin: PUBLIC_READ_ORIGIN, at: "finalized" }),
+    READ_TIMEOUT_MS,
+    "public triggerNonce read",
+  );
+  if (!result.success) {
+    throw new Error(`Unable to read public triggerNonce: ${sdkErrorMessage(result.value)}`);
+  }
+  return toBigInt(result.value, "public triggerNonce");
+}
+
 export async function connectActuatorWallet(): Promise<string> {
-  const { signerManager } = await getContext();
   const connected = await withTimeout(
     signerManager.connect("host"),
     CONNECTION_TIMEOUT_MS,
@@ -203,10 +239,10 @@ export async function connectActuatorWallet(): Promise<string> {
   return productAccount.value.address;
 }
 
-export async function readTriggerNonce(): Promise<bigint> {
+export async function readTriggerNonce(origin?: string): Promise<bigint> {
   const { contract } = await getContext();
   const result = await withTimeout(
-    contract.triggerNonce.query({ at: "finalized" }),
+    contract.triggerNonce.query({ origin, at: "finalized" }),
     READ_TIMEOUT_MS,
     "triggerNonce read",
   );
@@ -233,7 +269,7 @@ export async function triggerActuator(
   onStatus?: (status: ActuatorTransactionStatus) => void,
 ): Promise<TriggerActuatorResult> {
   return submissionLock.run(async () => {
-    const { contract, runtime, signerManager } = await getContext();
+    const { contract, runtime } = await getContext();
     const account = signerManager
       .getState()
       .accounts.find((candidate) => candidate.address === connectedAccountAddress);

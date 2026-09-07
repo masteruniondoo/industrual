@@ -5,6 +5,7 @@ import type { ActuatorState } from "../lib/http/parseLocalSensorPayload";
 import {
   connectActuatorWallet,
   isActuatorContractConfigured,
+  readPublicTriggerNonce,
   readTriggerNonce,
   triggerActuator,
   type ActuatorTransactionStatus,
@@ -58,12 +59,12 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
     if (!configured) return;
 
     let cancelled = false;
-    void readTriggerNonce()
+    void readPublicTriggerNonce()
       .then((nonce) => {
         if (!cancelled) setChainNonce(nonce);
       })
       .catch((readError) => {
-        console.warn("[industrial:actuator] Initial trigger nonce read failed", readError);
+        console.warn("[industrial:actuator] Public trigger nonce read failed", readError);
       });
 
     return () => {
@@ -103,6 +104,8 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
     try {
       const address = await connectActuatorWallet();
       setWalletAddress(address);
+      const nonce = await readTriggerNonce(address);
+      setChainNonce(nonce);
       setPhase("connected");
     } catch (connectionError) {
       console.error("[industrial:actuator] Wallet connection failed", connectionError);
