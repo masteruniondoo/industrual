@@ -3,8 +3,13 @@ import { access, readFile, readdir, stat } from "node:fs/promises";
 
 const DEFAULT_DOMAIN = "industrial.dot";
 const DEVNET_ENV = "devnet";
-const DEFAULT_DOTNS_RPC = "wss://sys.turboflakes.io/asset-hub-paseo";
-const requiredFiles = ["out/index.html", "public/industrial-icon.png"];
+// pad (@parity/polkadot-app-deploy 0.20.x) i dalje u svom `devnet` presetu
+// nosi DotNS ugovore povučene u devnet migraciji od 9. 9. 2026. Upis u njih
+// prolazi bez greške, ali ga host i dev-dot.li ne vide. Ovaj fajl pregazi
+// adrese zvaničnim (docs.polkadotcommunity.foundation/reference/addresses);
+// ukloniti kad pad preset bude ispravan.
+const ENVIRONMENT_FILE = "scripts/devnet-environment.json";
+const requiredFiles = ["out/index.html", "public/industrial-icon.png", ENVIRONMENT_FILE];
 const checkOnly = process.argv.includes("--check");
 const requestedDomain = process.argv.find(
   (argument) => !argument.startsWith("--") && argument.endsWith(".dot"),
@@ -20,10 +25,6 @@ function runPad(args, capture = false) {
   const executable = process.platform === "win32" ? "pad.cmd" : "pad";
   const result = spawnSync(executable, args, {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      DOTNS_RPC: process.env.DOTNS_RPC?.trim() || DEFAULT_DOTNS_RPC,
-    },
     shell: process.platform === "win32",
     stdio: capture ? "pipe" : "inherit",
   });
@@ -75,7 +76,9 @@ console.log(`Devnet preflight OK: ${domain}, Next static export, ${versionResult
 
 if (checkOnly) process.exit(0);
 
-if (!process.env.MNEMONIC?.trim()) {
+const hasMnemonic = Boolean(process.env.MNEMONIC?.trim());
+
+if (!hasMnemonic) {
   const identityResult = runPad(["whoami"], true);
   if (identityResult.status !== 0) {
     fail("nema aktivne wallet sesije. Pokreni 'npm run login:devnet' ili koristi secure deploy.");
@@ -83,14 +86,26 @@ if (!process.env.MNEMONIC?.trim()) {
   if (identityResult.stdout.trim()) console.log(identityResult.stdout.trim());
 }
 
-console.log(`Deploying ./out to ${domain} on Products Devnet...`);
-const deployResult = runPad([
+const deployArgs = [
   "./out",
   domain,
   "--env",
   DEVNET_ENV,
+  "--environment-file",
+  ENVIRONMENT_FILE,
   "--js-merkle",
   "--config",
   "./polkadot-app-deploy.config.ts",
-]);
+];
+
+// pad 0.20 više nema --publish (Browse/Publisher upis); nepoznat flag bi samo
+// tiho ignorisao. Vlasnik imena potpisuje preko MNEMONIC ili wallet sesije.
+if (!hasMnemonic) {
+  console.warn(
+    "Upozorenje: bez MNEMONIC promenljive deploy potpisuje pad wallet sesija. Za potpis vlasnikom koristi 'npm run deploy:devnet:secure'.",
+  );
+}
+
+console.log(`Deploying ./out to ${domain} on Products Devnet...`);
+const deployResult = runPad(deployArgs);
 process.exit(deployResult.status ?? 1);

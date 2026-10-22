@@ -21,9 +21,12 @@ import {
 type ActuatorPanelProps = {
   deviceNonce?: number;
   deviceState?: ActuatorState;
+  // No chain read and no wallet: CONNECT WALLET only reports the end of the demo.
+  demonstrationCompleted?: boolean;
 };
 
 type ActivationPhase =
+  | "demonstration-completed"
   | "unconfigured"
   | "disconnected"
   | "connecting"
@@ -45,7 +48,11 @@ function messageFromError(error: unknown) {
   }
 }
 
-export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) {
+export function ActuatorPanel({
+  deviceNonce,
+  deviceState,
+  demonstrationCompleted = false,
+}: ActuatorPanelProps) {
   const configured = isActuatorContractConfigured();
   const [phase, setPhase] = useState<ActivationPhase>(
     configured ? "disconnected" : "unconfigured",
@@ -56,7 +63,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!configured) return;
+    if (!configured || demonstrationCompleted) return;
 
     let cancelled = false;
     void readPublicTriggerNonce()
@@ -70,7 +77,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
     return () => {
       cancelled = true;
     };
-  }, [configured]);
+  }, [configured, demonstrationCompleted]);
 
   function handleTransactionStatus(status: ActuatorTransactionStatus) {
     if (status === "error") {
@@ -97,6 +104,10 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
   }
 
   async function connectWallet() {
+    if (demonstrationCompleted) {
+      setPhase("demonstration-completed");
+      return;
+    }
     if (!configured || pending || walletAddress) return;
 
     setError(null);
@@ -207,6 +218,7 @@ export function ActuatorPanel({ deviceNonce, deviceState }: ActuatorPanelProps) 
         </button>
 
         <div className="actuatorResult" aria-live="polite">
+            {phase === "demonstration-completed" ? <><strong>DEMONSTRATION COMPLETED</strong><span>This demonstration has ended. Wallet connection and payments are disabled.</span></> : null}
             {phase === "connecting" ? <><strong>CONNECTING WALLET</strong><span>Approve wallet access in the host.</span></> : null}
             {phase === "preparing" ? <><strong>PREPARING PAYMENT</strong><span>Preparing the account and payment request.</span></> : null}
             {phase === "connected" && walletAddress ? <><strong>WALLET CONNECTED</strong><span className="walletAddress">{walletAddress}</span></> : null}

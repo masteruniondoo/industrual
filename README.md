@@ -2,6 +2,18 @@
 
 Industrial.dot is an IoT demonstration of real-time sensor-message delivery through Polkadot Celerity, without a centralized backend. It is deployed as a Next.js static Polkadot Product bundle on `industrial.dot`.
 
+## Pages
+
+- `/` — static overview ([app/page.tsx](app/page.tsx)): what has been tested on
+  hardware, the security invariant, the roadmap, and the Process Privacy
+  research direction (zero-knowledge proofs of process compliance). Every claim
+  is labelled *Tested on hardware*, *Engineering · not built* or
+  *Research · not built*; no ZK code exists in this project.
+- `/#lab` — the Live Lab ([app/LiveLab.tsx](app/LiveLab.tsx)), shown in place on
+  the same page because the Products host loads the bundle as one document: the original
+  interactive console with live Celerity readings, the desktop gateway and the
+  paid actuator trigger. Everything below describes this page.
+
 ## Application flow
 
 1. **Physical sensing** — A DHT11 sensor measures temperature and humidity and sends the values to an ESP32 through a wired connection.
@@ -20,11 +32,11 @@ Industrial.dot is an IoT demonstration of real-time sensor-message delivery thro
 
 3. **Desktop gateway** — A desktop computer on the same Wi-Fi network runs `industrial.dot` inside the Polkadot Products host. It fetches the ESP32 endpoint every second, parses the response, and validates both values. This implementation is in [components/LocalSensorTest.tsx](components/LocalSensorTest.tsx).
 
-4. **Celerity publishing** — The desktop application acts as a gateway between the local sensor network and Celerity. The Products host provides the publisher account and Statement Store allowance. A signed reading is published to the `warehouse-01` topic whenever the actuator nonce or state changes, and as a complete heartbeat every 10 seconds regardless. This implementation is in [app/page.tsx](app/page.tsx).
+4. **Celerity publishing** — The desktop application acts as a gateway between the local sensor network and Celerity. The Products host provides the publisher account and Statement Store allowance. A signed reading is published to the `warehouse-01` topic whenever the actuator nonce or state changes, and as a complete heartbeat every 10 seconds regardless. This implementation is in [app/LiveLab.tsx](app/LiveLab.tsx).
 
 5. **Remote distribution** — Celerity distributes the signed message to subscribed Products clients. Remote devices do not need to be connected to the ESP32's local Wi-Fi network.
 
-6. **Remote clients (Desktop / Android / iPhone)** — There is no platform-specific implementation; every client runs the same `app/page.tsx` inside the common Polkadot Products host and connects to Statement Store in `host` mode (`app/page.tsx:294`), subscribing to the same `warehouse-01` topic (`app/page.tsx:301`). It displays temperature, humidity, message age, and publisher address. The local sensor and gateway controls stay hidden on any client where the ESP32 endpoint is unavailable.
+6. **Remote clients (Desktop / Android / iPhone)** — There is no platform-specific implementation; every client runs the same Live Lab page (`app/LiveLab.tsx`) inside the common Polkadot Products host and connects to Statement Store in `host` mode (`app/LiveLab.tsx:373`), subscribing to the same `warehouse-01` topic (`app/LiveLab.tsx:369`). It displays temperature, humidity, message age, and publisher address. The local sensor and gateway controls stay hidden on any client where the ESP32 endpoint is unavailable.
 
 7. **Monitoring status** — Readings are classified as `LIVE` (< 45s), `STALE` (45–90s), or `NO SIGNAL` (> 90s). The application keeps the latest 20 received messages in memory.
 
@@ -162,7 +174,17 @@ npm.cmd run deploy:devnet:secure
 ```
 
 The deploy command uploads `out/` to Bulletin Chain and registers or updates
-`industrial.dot` through DotNS. Never put a mnemonic in this repository, a
+`industrial.dot` through DotNS.
+
+`pad` (`@parity/polkadot-app-deploy` 0.20.x) still ships the DotNS contract
+addresses that the 2026-09-09 devnet migration retired. A deploy against them
+succeeds but is invisible to the Products host and `dev-dot.li`, which keep
+showing the previous version. `scripts/devnet.mjs` therefore passes
+`--environment-file scripts/devnet-environment.json`, which overrides the
+`devnet` contracts with the current ones from
+<https://docs.polkadotcommunity.foundation/reference/addresses/>. Bump
+`appVersion` in `polkadot-app-deploy.config.ts` together with `version` in
+`package.json` for every release. Never put a mnemonic in this repository, a
 command line, `.env`, or chat. A different eligible `.dot` name can be checked
 or deployed by passing it after `--`, for example:
 

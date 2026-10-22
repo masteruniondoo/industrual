@@ -67,7 +67,9 @@ const signerManager = new SignerManager({
     type === "host" ? new HostProvider({ dappName: "industrial.dot" }) : new DevProvider(),
   onConnect: async (_account, { requestResourceAllocation }) => {
     const outcomes = await withTimeout(
-      requestResourceAllocation([{ tag: "SmartContractAllowance", value: 0 }]),
+      requestResourceAllocation([
+        { tag: "SmartContractAllowance", value: { tag: "Index", value: 0 } },
+      ]),
       ALLOWANCE_TIMEOUT_MS,
       "smart-contract allowance",
     );

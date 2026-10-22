@@ -1,0 +1,878 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  isInsideContainer,
+  requestResourceAllocation,
+} from "@parity/product-sdk-host";
+import {
+  StatementConnectionError,
+  StatementDataTooLargeError,
+  StatementStoreClient,
+  StatementStoreError,
+  StatementSubmitError,
+} from "@parity/product-sdk-statement-store";
+import {
+  LocalSensorTest,
+  type LocalSensorStatus,
+} from "../components/LocalSensorTest";
+import { ActuatorPanel } from "../components/ActuatorPanel";
+import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
+import { watchCelerityConnection } from "../lib/telemetry/connectionRecovery";
+import { createSharedHostTransport } from "../lib/telemetry/sharedHostTransport";
+import { selfDotNsIdentifier } from "../lib/host/dotNsIdentifier";
+import { connectWallet, watchWalletConnection } from "../lib/host/walletSession";
+import { mergeLatest } from "../lib/telemetry/latestReading";
+import { decideRecovery } from "../lib/telemetry/gatewayRecovery";
+import {
+  isSensorReading,
+  toSensorReading,
+  type SensorReading,
+} from "../lib/telemetry/sensorReading";
+import {
+  createObservedState,
+  decidePublish,
+  HEARTBEAT_INTERVAL_MS,
+  type PublishReason,
+} from "../lib/telemetry/publishScheduler";
+
+const APP_NAME = "industrial";
+const TOPIC_2 = "warehouse-01";
+const CHANNEL = "warehouse-01/environment";
+const SENSOR_ID = "WAREHOUSE-01";
+const SENSOR_NAME = "Warehouse 1";
+// Fallback for when the page is not served under a DotNS name, e.g. next dev.
+const DEFAULT_DOTNS = "industrial.dot";
+const STATEMENT_TTL_SECONDS = 90;
+
+const LIVE_UNTIL_MS = 45_000;
+const STALE_UNTIL_MS = 90_000;
+const MAX_EVENTS = 20;
+const HOST_TIMEOUT_MS = 12_000;
+const STORE_TIMEOUT_MS = 15_000;
+const ALLOWANCE_TIMEOUT_MS = 60_000;
+// The demonstration has ended and the Lab is shown for presentations only: no
+// host, wallet, Statement Store, chain or ESP32 connection is opened, so the
+// host raises no prompts, and CONNECT WALLET reports that the demonstration is
+// over. Set to false to bring the live gateway back for testing.
+const DEMONSTRATION_COMPLETED = true;
+
+type EventRow = SensorReading & { receivedAt: number; signer?: string };
+type ConnectionState = "connecting" | "connected" | "error";
+type AllowanceState =
+  | "assumed"
+  | "not-requested"
+  | "requesting"
+  | "allocated"
+  | "rejected"
+  | "not-available"
+  | "unverified"
+  | "implicit"
+  | "error";
+
+// The only allowance states the host itself declared: it answered an allocation
+// request with "Rejected" or "NotAvailable". Every other state is either a
+// positive ("assumed", "allocated", "implicit") or the app not knowing - and the
+// app's guesses have proven wrong, so they must not block a publish attempt.
+// One publish settles the question for real.
+function isAllowanceRefused(allowance: AllowanceState): boolean {
+  return allowance === "rejected" || allowance === "not-available";
+}
+
+type DiagnosticState = {
+  host: string;
+  wallet: string;
+  statementStore: string;
+  subscription: string;
+  sensorHttp: string;
+  publish: string;
+  lastReceived: string;
+};
+
+function shortHex(value?: string) {
+  if (!value) return "—";
+  if (value.length < 18) return value;
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+}
+
+function serializeUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "undefined";
+  try {
+    return JSON.stringify(value, (_, nested) =>
+      typeof nested === "bigint" ? nested.toString() : nested,
+    );
+  } catch {
+    return String(value);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const detail = (error as Error & { detail?: unknown }).detail;
+    if (detail !== undefined && detail !== error) {
+      return `${error.message}; detail=${serializeUnknown(detail)}`;
+    }
+    return error.message;
+  }
+  if (error && typeof error === "object" && "reason" in error) {
+    return String((error as { reason: unknown }).reason);
+  }
+  return serializeUnknown(error);
+}
+
+function statementErrorMessage(error: unknown): string {
+  if (error instanceof StatementDataTooLargeError) {
+    return `StatementDataTooLargeError: ${error.message} (${error.actualSize}/${error.maxSize} bytes)`;
+  }
+  if (error instanceof StatementSubmitError) {
+    return `StatementSubmitError: ${error.message}; detail=${serializeUnknown(error.detail)}`;
+  }
+  if (error instanceof StatementConnectionError) {
+    return `StatementConnectionError: ${error.message}`;
+  }
+  if (error instanceof StatementStoreError) {
+    return `${error.constructor.name}: ${error.message}`;
+  }
+  return errorMessage(error);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(resolve, reject).finally(() => window.clearTimeout(timeout));
+  });
+}
+
+function ageLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) return "—";
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1_000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.floor(seconds / 60)}m ago`;
+}
+
+function allowanceLabel(state: AllowanceState): string {
+  switch (state) {
+    case "assumed": return "ASSUMED — VERIFYING";
+    case "not-requested": return "NOT REQUESTED";
+    case "requesting": return "REQUESTING — CONFIRM IN HOST";
+    case "allocated": return "ALLOCATED";
+    case "rejected": return "REJECTED";
+    case "not-available": return "NOT AVAILABLE";
+    case "unverified": return "RESPONSE UNREADABLE — VERIFY BY PUBLISHING";
+    case "implicit": return "IMPLICIT HOST PROVISIONING";
+    case "error": return "ERROR";
+  }
+}
+
+function isMissingAllowanceError(message: string): boolean {
+  return /no allowance|missing allowance|allowance (?:is )?not (?:set|found|allocated)/i.test(
+    message,
+  );
+}
+
+export default function Home() {
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const [connection, setConnection] = useState<ConnectionState>(
+    DEMONSTRATION_COMPLETED ? "error" : "connecting",
+  );
+  const [connectionDetail, setConnectionDetail] = useState("Detecting Polkadot Products host…");
+  const [latest, setLatest] = useState<EventRow | null>(null);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [physicalReading, setPhysicalReading] = useState<HttpSensorReading | null>(null);
+  const [allowance, setAllowance] = useState<AllowanceState>("assumed");
+  const [allocating, setAllocating] = useState(false);
+  const [autoPublish, setAutoPublish] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [lastPublishAt, setLastPublishAt] = useState<number | null>(null);
+  const [lastPublishResult, setLastPublishResult] = useState("NOT TESTED");
+  const [now, setNow] = useState(() => Date.now());
+  const [diagnostics, setDiagnostics] = useState<DiagnosticState>({
+    host: "CHECKING",
+    wallet: "NOT CONNECTED",
+    statementStore: "NOT CONNECTED",
+    subscription: "INACTIVE",
+    sensorHttp: "CHECKING",
+    publish: "NOT TESTED",
+    lastReceived: "—",
+  });
+  const clientRef = useRef<StatementStoreClient | null>(null);
+  const connectingRef = useRef(false);
+  const lastCelerityReceivedAtRef = useRef(0);
+  const physicalReadingRef = useRef<HttpSensorReading | null>(null);
+  // The receiver ages a statement from its arrival time, so republishing a
+  // value the ESP32 no longer stands behind would show stale data as LIVE.
+  const physicalReadingIsCurrentRef = useRef(false);
+  const publishInFlightRef = useRef(false);
+  // Backoff only. It delays the next attempt; it must never become the sole
+  // path to one, or a publish that keeps failing before it reaches the network
+  // leaves the gateway with nothing driving it.
+  const publishRetryAtRef = useRef(0);
+  const lastForcedRecoveryRef = useRef(Date.now());
+  // Auto publish being off is only meaningful if the operator chose it. Off
+  // because it was never armed, or because a reconnect lost it, is a fault the
+  // gateway has to repair by itself.
+  const autoPublishOffByOperatorRef = useRef(false);
+  // Nonce, actuator state and the heartbeat clock, kept across local polls.
+  const observedRef = useRef(createObservedState());
+  const initialPublishAttemptRef = useRef(false);
+
+  const updateDiagnostic = useCallback((key: keyof DiagnosticState, value: string) => {
+    setDiagnostics((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const recordCelerityReading = useCallback((
+    reading: SensorReading,
+    receivedAt: number,
+    signer?: string,
+  ) => {
+    const received: EventRow = { ...reading, receivedAt, signer };
+
+    setLatest((current) => mergeLatest(current, received));
+
+    setEvents((current) => {
+      const existing = current.find(
+        (event) => event.sensor === received.sensor && event.timestamp === received.timestamp,
+      );
+      const merged: EventRow = {
+        ...received,
+        receivedAt: existing?.receivedAt ?? receivedAt,
+        signer: signer ?? existing?.signer,
+      };
+
+      return [
+        merged,
+        ...current.filter(
+          (event) => event.sensor !== received.sensor || event.timestamp !== received.timestamp,
+        ),
+      ]
+        .sort((left, right) => right.timestamp - left.timestamp)
+        .slice(0, MAX_EVENTS);
+    });
+
+    updateDiagnostic("lastReceived", new Date(receivedAt).toLocaleTimeString());
+  }, [updateDiagnostic]);
+
+  const handlePhysicalReading = useCallback((reading: HttpSensorReading) => {
+    physicalReadingRef.current = reading;
+    physicalReadingIsCurrentRef.current = true;
+    setPhysicalReading(reading);
+  }, []);
+
+  const handleSensorStatus = useCallback((status: LocalSensorStatus, detail: string) => {
+    // Preserve the last outcome during a retry instead of hiding the failure
+    // behind a transient READING label every second.
+    if (status !== "reading") updateDiagnostic("sensorHttp", detail);
+
+    // A sensor that has nothing to report, or that dropped off the network,
+    // pauses publishing; it does not end it. Auto publish stays armed so the
+    // gateway resumes on its own once a fresh reading arrives.
+    if (status === "no-reading" || status === "error") {
+      physicalReadingIsCurrentRef.current = false;
+    }
+
+    if (status === "error") {
+      physicalReadingRef.current = null;
+      // Keep the gateway diagnostics visible with the last known reading.
+      // The current-reading flag and ref above still block stale publishing.
+    }
+  }, [updateDiagnostic]);
+
+  useEffect(() => {
+    const ticker = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    if (DEMONSTRATION_COMPLETED) return;
+    let cancelled = false;
+    connectingRef.current = true;
+    let hostWasDetected = false;
+    let client: StatementStoreClient | null = null;
+    let subscription: { unsubscribe: () => void } | undefined;
+    let walletWatch: { unsubscribe: () => void } | undefined;
+
+    async function boot() {
+      try {
+        setConnection("connecting");
+        setConnectionDetail("Detecting Polkadot Products host…");
+
+        const hostDetected = await withTimeout(
+          isInsideContainer(),
+          HOST_TIMEOUT_MS,
+          "Products host detection timed out.",
+        );
+        if (!hostDetected) {
+          throw new Error(
+            "Polkadot Products host was not detected. Open industrial.dot inside a Products container.",
+          );
+        }
+        if (cancelled) return;
+        hostWasDetected = true;
+        updateDiagnostic("host", "DETECTED");
+
+        // isInsideContainer() only reads the environment, so it says nothing
+        // about whether a wallet is connected. The host hands out no account
+        // until something asks, and the approval prompt it raises is the user's
+        // to answer. Asking here keeps that prompt attached to a step the page
+        // can name and retry, instead of letting it surface mid-publish where
+        // the app is already committed and waiting on a timer it did not pick.
+        setConnectionDetail("Connecting the host wallet…");
+        const dotNs = selfDotNsIdentifier(window.location.hostname) ?? DEFAULT_DOTNS;
+        const wallet = await connectWallet(dotNs);
+        if (cancelled) return;
+
+        if (wallet.status === "connected") {
+          const { username, statementSubmitGranted } = wallet.session;
+          updateDiagnostic(
+            "wallet",
+            statementSubmitGranted ? username : `${username} (SUBMIT NOT GRANTED)`,
+          );
+          walletWatch = watchWalletConnection(wallet.session, (connected) => {
+            updateDiagnostic("wallet", connected ? username : "DISCONNECTED");
+          });
+        } else if (wallet.status === "unsupported") {
+          // Host mode may still authenticate the publisher without a product
+          // account, so this is recorded and stepped over, not treated as fatal.
+          updateDiagnostic("wallet", `UNAVAILABLE: ${wallet.detail}`);
+        } else {
+          // Stop here rather than falling through to a Statement Store call
+          // that would fail later with a less specific message.
+          updateDiagnostic("wallet", `${wallet.status.toUpperCase()}: ${wallet.detail}`);
+          setConnection("error");
+          setConnectionDetail(wallet.detail);
+          return;
+        }
+
+        setConnectionDetail("Connecting to Celerity / Statement Store in host mode…");
+
+        const transport = await withTimeout(
+          createSharedHostTransport(),
+          STORE_TIMEOUT_MS,
+          "Statement Store host transport timed out.",
+        );
+        if (cancelled) return;
+        client = new StatementStoreClient({
+          appName: APP_NAME,
+          defaultTtlSeconds: STATEMENT_TTL_SECONDS,
+          transport,
+        });
+        clientRef.current = client;
+
+        // connect() starts receiving immediately, including stored statements.
+        // Register first so the SDK does not mark the initial reading as seen
+        // before this receiver has a chance to process it.
+        subscription = client.subscribe<SensorReading>(
+          (statement) => {
+            if (cancelled) return;
+            if (!isSensorReading(statement.data)) {
+              console.warn("[industrial] Ignored malformed or unrelated statement", statement.data);
+              return;
+            }
+
+            recordCelerityReading(statement.data, Date.now(), statement.signerHex);
+            lastCelerityReceivedAtRef.current = Date.now();
+          },
+          { topic2: TOPIC_2 },
+        );
+
+        await withTimeout(
+          client.connect({ mode: "host" }),
+          STORE_TIMEOUT_MS,
+          "Statement Store timed out. The Products host did not answer.",
+        );
+        if (cancelled) return;
+        updateDiagnostic("statementStore", "CONNECTED (HOST MODE)");
+
+        updateDiagnostic("subscription", "ACTIVE");
+        setConnection("connected");
+        setConnectionDetail(`Celerity connected; subscribed to ${SENSOR_NAME}`);
+      } catch (error) {
+        console.error("[industrial] Celerity boot failed", error);
+        if (cancelled) return;
+        walletWatch?.unsubscribe();
+        subscription?.unsubscribe();
+        client?.destroy();
+        if (clientRef.current === client) clientRef.current = null;
+        setConnection("error");
+        setConnectionDetail(statementErrorMessage(error));
+        if (!hostWasDetected) updateDiagnostic("host", "NOT DETECTED");
+        updateDiagnostic("statementStore", `ERROR: ${statementErrorMessage(error)}`);
+      } finally {
+        if (!cancelled) connectingRef.current = false;
+      }
+    }
+
+    void boot();
+
+    return () => {
+      cancelled = true;
+      connectingRef.current = false;
+      walletWatch?.unsubscribe();
+      subscription?.unsubscribe();
+      client?.destroy();
+      if (clientRef.current === client) clientRef.current = null;
+    };
+  }, [connectionAttempt, recordCelerityReading, updateDiagnostic]);
+
+  useEffect(() => DEMONSTRATION_COMPLETED ? undefined : watchCelerityConnection({
+    lastReceivedAt: () => lastCelerityReceivedAtRef.current,
+    reconnect: () => {
+      // Let an active connection or publish finish before replacing its client.
+      if (connectingRef.current || publishInFlightRef.current) return false;
+      connectingRef.current = true;
+      setConnectionAttempt((attempt) => attempt + 1);
+      return true;
+    },
+  }), []);
+
+  const requestAllowance = useCallback(async () => {
+    if (
+      allowance === "assumed" ||
+      allowance === "requesting" ||
+      allowance === "allocated" ||
+      allowance === "implicit" ||
+      allowance === "not-available" ||
+      allowance === "unverified"
+    ) {
+      return;
+    }
+
+    if (connection !== "connected" || !clientRef.current?.isConnected()) {
+      setAllowance("error");
+      setLastPublishResult("StatementConnectionError: Statement Store is not connected");
+      return;
+    }
+
+    setAllocating(true);
+    setAllowance("requesting");
+
+    try {
+      const allocationResult = await withTimeout(
+        requestResourceAllocation([
+          { tag: "StatementStoreAllowance", value: undefined },
+        ]),
+        ALLOWANCE_TIMEOUT_MS,
+        "Statement Store allowance request timed out. Confirm it in the Products host.",
+      );
+
+      if (!allocationResult.ok) throw allocationResult.error;
+      const outcome = allocationResult.value[0];
+
+      switch (outcome) {
+        case "Allocated":
+          setAllowance("allocated");
+          setAutoPublish(true);
+          break;
+        case "Rejected":
+          setAllowance("rejected");
+          break;
+        case "NotAvailable":
+          setAllowance("not-available");
+          break;
+        default:
+          throw new Error(`Unexpected allocation outcome: ${serializeUnknown(outcome)}`);
+      }
+    } catch (error) {
+      console.error("[industrial] Statement Store allowance request failed", error);
+      const message = errorMessage(error);
+      if (message.includes("Unknown enum discriminant")) {
+        setAllowance("unverified");
+        setLastPublishResult(
+          "ALLOCATION RESPONSE UNREADABLE — USE PUBLISH CURRENT READING TO VERIFY THE APPROVED ALLOWANCE",
+        );
+      } else {
+        setAllowance("error");
+        setLastPublishResult(`ALLOWANCE ERROR: ${message}`);
+      }
+    } finally {
+      setAllocating(false);
+    }
+  }, [allowance, connection]);
+
+  const publishCurrentReading = useCallback(async (trigger: PublishReason | "manual") => {
+    if (publishInFlightRef.current) return false;
+
+    const client = clientRef.current;
+    const current = physicalReadingRef.current;
+
+    if (!client?.isConnected()) {
+      const message = "StatementConnectionError: Statement Store is not connected";
+      setLastPublishResult(message);
+      updateDiagnostic("publish", message);
+      return false;
+    }
+    if (
+      !current ||
+      !physicalReadingIsCurrentRef.current ||
+      !Number.isFinite(current.temperature) ||
+      !Number.isFinite(current.humidity) ||
+      !Number.isFinite(current.timestamp) ||
+      Date.now() - current.timestamp >= LIVE_UNTIL_MS
+    ) {
+      const message = "REJECTED: NO VALID PHYSICAL SENSOR READING";
+      setLastPublishResult(message);
+      updateDiagnostic("publish", message);
+      return false;
+    }
+
+    const reading = toSensorReading(current, trigger);
+
+    publishInFlightRef.current = true;
+    setPublishing(true);
+    setLastPublishResult(`${trigger.toUpperCase()} SUBMISSION IN PROGRESS`);
+    updateDiagnostic("publish", `${trigger.toUpperCase()} SUBMISSION IN PROGRESS`);
+
+    try {
+      const result = await withTimeout(
+        client.publish(reading, {
+          topic2: TOPIC_2,
+          channel: CHANNEL,
+          ttlSeconds: STATEMENT_TTL_SECONDS,
+        }),
+        STORE_TIMEOUT_MS,
+        "Statement Store publish timed out.",
+      );
+
+      if (!result.ok) throw result.error;
+
+      const acceptedAt = Date.now();
+      publishRetryAtRef.current = 0;
+      console.info("[industrial] Statement Store publish accepted", { trigger, reading });
+      setLastPublishAt(acceptedAt);
+      setLastPublishResult("ACCEPTED");
+      updateDiagnostic("publish", "ACCEPTED");
+      recordCelerityReading(reading, acceptedAt);
+      setAllowance((currentAllowance) =>
+        currentAllowance === "allocated" ? currentAllowance : "implicit",
+      );
+      return true;
+    } catch (error) {
+      const message = statementErrorMessage(error);
+      console.error("[industrial] Statement Store publish failed", error);
+      setLastPublishResult(message);
+      updateDiagnostic("publish", `ERROR: ${message}`);
+      // Only an error that actually names the allowance says anything about
+      // it. Demoting on any failure - a timeout, a moment without a socket -
+      // was enough to convince the app the host would refuse, which then
+      // blocked arming, blocked recovery and disabled the auto-publish control,
+      // while a manual publish went through and proved the belief wrong.
+      if (isMissingAllowanceError(message)) setAllowance("not-requested");
+      // Keep the user's auto-publish choice armed, including while the host
+      // restores allowance, and back off before trying again. The retry itself
+      // is the ordinary heartbeat: decidePublish already adopted this snapshot,
+      // so the next heartbeat carries the same complete state within 10s.
+      publishRetryAtRef.current = Date.now() + HEARTBEAT_INTERVAL_MS;
+      return false;
+    } finally {
+      publishInFlightRef.current = false;
+      setPublishing(false);
+    }
+  }, [recordCelerityReading, updateDiagnostic]);
+
+  useEffect(() => {
+    if (
+      initialPublishAttemptRef.current ||
+      isAllowanceRefused(allowance) ||
+      connection !== "connected" ||
+      !physicalReading
+    ) {
+      return;
+    }
+
+    // Arming is enough: the scheduling effect below treats the next snapshot as
+    // a due heartbeat and sends it, so start-up produces one message, not two.
+    initialPublishAttemptRef.current = true;
+    setAutoPublish(true);
+  }, [allowance, connection, physicalReading]);
+
+  // One decision per local snapshot, so a nonce step and the actuator switching
+  // on in the same reading cost one message rather than two. decidePublish
+  // adopts the snapshot as it decides, which also makes a re-run for the same
+  // reading a no-op when an unrelated render retriggers this effect.
+  useEffect(() => {
+    if (
+      !autoPublish ||
+      connection !== "connected" ||
+      publishing ||
+      !physicalReading ||
+      !physicalReadingIsCurrentRef.current ||
+      Date.now() - physicalReading.timestamp >= LIVE_UNTIL_MS ||
+      Date.now() < publishRetryAtRef.current
+    ) return;
+
+    const decision = decidePublish(
+      observedRef.current,
+      physicalReading,
+      Date.now(),
+      HEARTBEAT_INTERVAL_MS,
+    );
+    if (!decision.publish) return;
+
+    void publishCurrentReading(decision.reason);
+  }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading, now]);
+
+  // Supervisor, and deliberately not a diagnosis.
+  //
+  // A successful publish is the only thing that refreshes this device's own
+  // view of the signal, so when publishing stops while everything it depends on
+  // still looks healthy - connected, armed, a current reading - nothing else
+  // notices and the page sits at NO SIGNAL until someone reloads it. Rather
+  // than enumerate the ways that can happen, reopen the heartbeat window and
+  // let the ordinary path try again. Once every three intervals, so a host that
+  // is genuinely refusing is not hammered.
+  useEffect(() => {
+    const recovery = decideRecovery({
+      connected: connection === "connected",
+      hasCurrentReading: Boolean(physicalReading) && physicalReadingIsCurrentRef.current,
+      allowanceRefused: isAllowanceRefused(allowance),
+      autoPublish,
+      offByOperator: autoPublishOffByOperatorRef.current,
+      lastPublishAt,
+      lastRecoveryAt: lastForcedRecoveryRef.current,
+      now,
+    });
+    if (recovery === "none") return;
+
+    lastForcedRecoveryRef.current = now;
+    observedRef.current.lastHeartbeatAt = undefined;
+    publishRetryAtRef.current = 0;
+
+    if (recovery === "rearm") {
+      initialPublishAttemptRef.current = true;
+      setAutoPublish(true);
+      updateDiagnostic("publish", "AUTO PUBLISH WAS OFF — RE-ARMED");
+      return;
+    }
+    updateDiagnostic("publish", "NO PUBLISH IN 30s — REOPENING THE HEARTBEAT");
+  }, [autoPublish, allowance, connection, physicalReading, lastPublishAt, now, updateDiagnostic]);
+
+  function toggleAutoPublish() {
+    if (autoPublish) {
+      autoPublishOffByOperatorRef.current = true;
+      setAutoPublish(false);
+      return;
+    }
+    autoPublishOffByOperatorRef.current = false;
+    if (connection !== "connected") {
+      const message = "ENABLE FAILED: STATEMENT STORE NOT CONNECTED";
+      setLastPublishResult(message);
+      updateDiagnostic("publish", message);
+      return;
+    }
+    if (!physicalReadingRef.current) {
+      const message = "ENABLE FAILED: NO VALID PHYSICAL SENSOR READING";
+      setLastPublishResult(message);
+      updateDiagnostic("publish", message);
+      return;
+    }
+    if (isAllowanceRefused(allowance)) {
+      const message = "ENABLE CELERITY BEFORE AUTO PUBLISH";
+      setLastPublishResult(message);
+      updateDiagnostic("publish", message);
+      return;
+    }
+    setAutoPublish(true);
+  }
+
+  const signalAge = latest ? Math.max(0, now - latest.receivedAt) : null;
+  const signalLabel = useMemo(() => {
+    if (connection !== "connected") return connection === "connecting" ? "CONNECTING" : "OFFLINE";
+    if (signalAge === null || signalAge > STALE_UNTIL_MS) return "NO SIGNAL";
+    if (signalAge >= LIVE_UNTIL_MS) return "STALE";
+    return "LIVE";
+  }, [connection, signalAge]);
+
+  const allowanceStatusClass =
+    allowance === "allocated" || allowance === "implicit"
+      ? "status-live"
+      : allowance === "assumed" || allowance === "requesting"
+        ? "status-connecting"
+        : allowance === "rejected" || allowance === "error"
+          ? "status-offline"
+          : "status-no-signal";
+
+  return (
+    <main className="shell">
+      <header className="topbar">
+        <div>
+          <div className="eyebrow">INDUSTRIAL · LIVE MONITORING</div>
+          <h1>industrial</h1>
+        </div>
+        <div className={`status status-${signalLabel.toLowerCase().replace(" ", "-")}`}>
+          <span className="dot" />
+          {signalLabel}
+        </div>
+      </header>
+
+      {signalLabel !== "LIVE" ? <section className="panel demoNotice" role="status">
+        <div className="demoNoticeStatus">
+          <span className="dot" />
+          BROADCAST ENDED
+        </div>
+        <div>
+          <span className="eyebrow">DEMONSTRATION COMPLETED</span>
+          <p>
+            The ESP32 acts as a light client, watching the smart contract&apos;s finalized
+            trigger nonce. When the nonce increases, it activates the actuator. Temperature,
+            humidity, the observed nonce, and actuator state are broadcast through Polkadot
+            Celerity.
+          </p>
+        </div>
+      </section> : null}
+
+      {DEMONSTRATION_COMPLETED ? null : <LocalSensorTest
+        onReading={handlePhysicalReading}
+        onStatusChange={handleSensorStatus}
+      />}
+
+      {physicalReading ? <section className="panel gatewayPanel">
+        <div className="sectionHeading">
+          <div><span className="eyebrow">CELERITY GATEWAY</span><h2>Desktop publisher</h2></div>
+          <div className={`status ${allowanceStatusClass}`}>
+            <span className="dot" />
+            {allowanceLabel(allowance)}
+          </div>
+        </div>
+
+        <div className="gatewayActions">
+          <button
+            className="primaryButton"
+            onClick={() => void requestAllowance()}
+            disabled={
+              allocating ||
+              connection !== "connected" ||
+              allowance === "assumed" ||
+              allowance === "allocated" ||
+              allowance === "implicit" ||
+              allowance === "not-available" ||
+              allowance === "unverified"
+            }
+          >
+            {allocating
+              ? "REQUESTING…"
+              : allowance === "assumed"
+                ? "VERIFYING ALLOWANCE…"
+                : allowance === "allocated" || allowance === "implicit"
+                  ? "CELERITY ENABLED"
+                  : allowance === "not-available" || allowance === "unverified"
+                    ? "VERIFY WITH MANUAL PUBLISH"
+                    : "ENABLE CELERITY"}
+          </button>
+          <button
+            className={autoPublish ? "toggleButton toggleButtonOn" : "toggleButton"}
+            onClick={toggleAutoPublish}
+            aria-pressed={autoPublish}
+            disabled={
+              !autoPublish && (connection !== "connected" || isAllowanceRefused(allowance))
+            }
+          >
+            AUTO PUBLISH · {autoPublish ? "ON" : "OFF"}
+          </button>
+          <button
+            className="secondaryActionButton"
+            onClick={() => void publishCurrentReading("manual")}
+            disabled={publishing || connection !== "connected" || !physicalReading}
+          >
+            {publishing ? "PUBLISHING…" : "PUBLISH CURRENT READING"}
+          </button>
+        </div>
+
+        <div className="gatewayGrid">
+          <div><span>Allowance</span><strong>{allowanceLabel(allowance)}</strong></div>
+          <div><span>Host mode</span><strong>{connection === "connected" ? "CONNECTED" : connection.toUpperCase()}</strong></div>
+          <div><span>Auto publish</span><strong>{autoPublish ? "ON" : "OFF"}</strong></div>
+          <div><span>Publish interval</span><strong>{HEARTBEAT_INTERVAL_MS / 1_000} SEC</strong></div>
+          <div><span>Last physical reading</span><strong>{ageLabel(physicalReading?.timestamp ?? null, now)}</strong></div>
+          <div><span>Last Celerity publish</span><strong>{ageLabel(lastPublishAt, now)}</strong></div>
+          <div className="gatewayResult"><span>Result</span><strong>{lastPublishResult}</strong></div>
+        </div>
+      </section> : null}
+
+      <section className="hero panel">
+        <div className="heroTitle">
+          <span>CELERITY LIVE · REMOTE RECEIVER</span>
+          <strong>{SENSOR_ID}</strong>
+        </div>
+        <div className="metrics">
+          <div className="metric">
+            <span>Temperature</span>
+            <strong>{latest ? latest.temperature.toFixed(1) : "—"}<small> °C</small></strong>
+          </div>
+          <div className="metric">
+            <span>Humidity</span>
+            <strong>{latest ? latest.humidity.toFixed(1) : "—"}<small> %</small></strong>
+          </div>
+        </div>
+        <div className="heroActuator">
+          <div><span>ACTUATOR-01 state</span><strong className={latest?.actuatorState === "ON" ? "actuatorOn" : "actuatorOff"}>{latest?.actuatorState ?? "—"}</strong></div>
+          <div><span>Last trigger observed by device</span><strong>{latest?.actuatorNonce === undefined ? "—" : `#${latest.actuatorNonce}`}</strong></div>
+        </div>
+        <div className="metaGrid">
+          <div><span>Namespace</span><strong>{APP_NAME}</strong></div>
+          <div><span>Topic</span><strong>{TOPIC_2}</strong></div>
+          <div><span>Received</span><strong>{ageLabel(latest?.receivedAt ?? null, now)}</strong></div>
+          <div><span>Signals received</span><strong>{events.length}</strong></div>
+        </div>
+      </section>
+
+      <ActuatorPanel
+        deviceNonce={latest?.actuatorNonce}
+        deviceState={latest?.actuatorState}
+        demonstrationCompleted={DEMONSTRATION_COMPLETED}
+      />
+
+      {physicalReading ? <section className="panel connectionPanel">
+        <div><span className="label">Connection</span><strong>{connectionDetail}</strong></div>
+        <div><span className="label">Products host detected</span><code>{diagnostics.host}</code></div>
+        <div><span className="label">Host wallet</span><code>{diagnostics.wallet}</code></div>
+        <div><span className="label">Statement Store</span><code>{diagnostics.statementStore}</code></div>
+        <div><span className="label">Subscription</span><code>{diagnostics.subscription}</code></div>
+        <div><span className="label">Statement Store allowance</span><code>{allowanceLabel(allowance)}</code></div>
+        <div><span className="label">Sensor HTTP status</span><code>{diagnostics.sensorHttp}</code></div>
+        <div><span className="label">Last physical reading</span><code>{ageLabel(physicalReading?.timestamp ?? null, now)}</code></div>
+        <div><span className="label">Auto publish</span><code>{autoPublish ? "ON" : "OFF"}</code></div>
+        <div><span className="label">Last publish result</span><code>{diagnostics.publish}</code></div>
+        <div><span className="label">Last received statement</span><code>{diagnostics.lastReceived}</code></div>
+        <div><span className="label">Signals received</span><code>{events.length}</code></div>
+      </section> : null}
+
+      <section className="panel eventPanel">
+        <div className="sectionHeading">
+          <div><span className="eyebrow">RECENT CELERITY SIGNALS</span><h2>Statement Store feed</h2></div>
+          <span>{events.length}/{MAX_EVENTS}</span>
+        </div>
+        {events.length === 0 ? (
+          <div className="empty">
+            <strong>Waiting for {SENSOR_NAME}…</strong>
+            <span>Subscribed to appName “{APP_NAME}” and topic2 “{TOPIC_2}”.</span>
+          </div>
+        ) : (
+          <div className="tableWrap">
+            <table>
+              <thead><tr><th>Received</th><th>Temperature</th><th>Humidity</th><th>Actuator</th><th>Trigger</th><th>Sensor time</th><th>Signer</th></tr></thead>
+              <tbody>
+                {events.map((event, index) => (
+                  <tr key={`${event.receivedAt}-${index}`}>
+                    <td>{new Date(event.receivedAt).toLocaleTimeString()}</td>
+                    <td>{event.temperature.toFixed(1)} °C</td>
+                    <td>{event.humidity.toFixed(1)} %</td>
+                    <td>{event.actuatorState ?? "—"}</td>
+                    <td>{event.actuatorNonce === undefined ? "—" : `#${event.actuatorNonce}`}</td>
+                    <td>{new Date(event.timestamp).toLocaleTimeString()}</td>
+                    <td><code>{shortHex(event.signer)}</code></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <footer>
+        Statement Store authenticates the Products host publisher; ESP32 device signing is not included yet.
+      </footer>
+    </main>
+  );
+}

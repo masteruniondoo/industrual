@@ -1,824 +1,445 @@
-"use client";
+// The overview page. Everything here is static; the interactive console is
+// the original page in LiveLab.tsx, shown in place at #lab by ViewSwitch.
+// Every claim carries a Tag so a reader can tell what has run on the bench
+// from what is only being investigated - see the "Where the line is" section
+// before adding a new one.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  isInsideContainer,
-  requestResourceAllocation,
-} from "@parity/product-sdk-host";
-import {
-  StatementConnectionError,
-  StatementDataTooLargeError,
-  StatementStoreClient,
-  StatementStoreError,
-  StatementSubmitError,
-} from "@parity/product-sdk-statement-store";
-import {
-  LocalSensorTest,
-  type LocalSensorStatus,
-} from "../components/LocalSensorTest";
-import { ActuatorPanel } from "../components/ActuatorPanel";
-import type { HttpSensorReading } from "../lib/http/parseLocalSensorPayload";
-import { watchCelerityConnection } from "../lib/telemetry/connectionRecovery";
-import { createSharedHostTransport } from "../lib/telemetry/sharedHostTransport";
-import { mergeLatest } from "../lib/telemetry/latestReading";
-import { decideRecovery } from "../lib/telemetry/gatewayRecovery";
-import {
-  isSensorReading,
-  toSensorReading,
-  type SensorReading,
-} from "../lib/telemetry/sensorReading";
-import {
-  createObservedState,
-  decidePublish,
-  HEARTBEAT_INTERVAL_MS,
-  type PublishReason,
-} from "../lib/telemetry/publishScheduler";
+import { ViewSwitch } from "./ViewSwitch";
 
-const APP_NAME = "industrial";
-const TOPIC_2 = "warehouse-01";
-const CHANNEL = "warehouse-01/environment";
-const SENSOR_ID = "WAREHOUSE-01";
-const SENSOR_NAME = "Warehouse 1";
-const STATEMENT_TTL_SECONDS = 90;
+type Status = "tested" | "next" | "research";
 
-const LIVE_UNTIL_MS = 45_000;
-const STALE_UNTIL_MS = 90_000;
-const MAX_EVENTS = 20;
-const HOST_TIMEOUT_MS = 12_000;
-const STORE_TIMEOUT_MS = 15_000;
-const ALLOWANCE_TIMEOUT_MS = 60_000;
-
-type EventRow = SensorReading & { receivedAt: number; signer?: string };
-type ConnectionState = "connecting" | "connected" | "error";
-type AllowanceState =
-  | "assumed"
-  | "not-requested"
-  | "requesting"
-  | "allocated"
-  | "rejected"
-  | "not-available"
-  | "unverified"
-  | "implicit"
-  | "error";
-
-// The only allowance states the host itself declared: it answered an allocation
-// request with "Rejected" or "NotAvailable". Every other state is either a
-// positive ("assumed", "allocated", "implicit") or the app not knowing - and the
-// app's guesses have proven wrong, so they must not block a publish attempt.
-// One publish settles the question for real.
-function isAllowanceRefused(allowance: AllowanceState): boolean {
-  return allowance === "rejected" || allowance === "not-available";
-}
-
-type DiagnosticState = {
-  host: string;
-  statementStore: string;
-  subscription: string;
-  sensorHttp: string;
-  publish: string;
-  lastReceived: string;
+const STATUS_LABEL: Record<Status, string> = {
+  tested: "Tested on hardware",
+  next: "Engineering · not built",
+  research: "Research · not built",
 };
 
-function shortHex(value?: string) {
-  if (!value) return "—";
-  if (value.length < 18) return value;
-  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+function Tag({ status }: { status: Status }) {
+  return (
+    <span className={`tag tag-${status}`}>
+      <span className="dot" />
+      {STATUS_LABEL[status]}
+    </span>
+  );
 }
 
-function serializeUnknown(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value === undefined) return "undefined";
-  try {
-    return JSON.stringify(value, (_, nested) =>
-      typeof nested === "bigint" ? nested.toString() : nested,
-    );
-  } catch {
-    return String(value);
-  }
-}
+const HERO_STATS = [
+  { value: "30+ h", label: "continuous telemetry from the bench to remote phones" },
+  { value: "> 2/3", label: "GRANDPA weight checked on the ESP32 itself" },
+  { value: "1 PAS", label: "on-chain trigger, one verified 60 s relay pulse" },
+  { value: "0", label: "backend servers, databases or cloud controllers" },
+];
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    const detail = (error as Error & { detail?: unknown }).detail;
-    if (detail !== undefined && detail !== error) {
-      return `${error.message}; detail=${serializeUnknown(detail)}`;
-    }
-    return error.message;
-  }
-  if (error && typeof error === "object" && "reason" in error) {
-    return String((error as { reason: unknown }).reason);
-  }
-  return serializeUnknown(error);
-}
+const TELEMETRY_FLOW = [
+  { name: "DHT11", detail: "temperature · humidity" },
+  { name: "ESP32", detail: "wired read · /sensor.txt" },
+  { name: "Desktop gateway", detail: "industrial.dot in the Products host" },
+  { name: "Celerity", detail: "signed Statement Store messages" },
+  { name: "Remote clients", detail: "desktop · Android · iPhone" },
+];
 
-function statementErrorMessage(error: unknown): string {
-  if (error instanceof StatementDataTooLargeError) {
-    return `StatementDataTooLargeError: ${error.message} (${error.actualSize}/${error.maxSize} bytes)`;
-  }
-  if (error instanceof StatementSubmitError) {
-    return `StatementSubmitError: ${error.message}; detail=${serializeUnknown(error.detail)}`;
-  }
-  if (error instanceof StatementConnectionError) {
-    return `StatementConnectionError: ${error.message}`;
-  }
-  if (error instanceof StatementStoreError) {
-    return `${error.constructor.name}: ${error.message}`;
-  }
-  return errorMessage(error);
-}
+const CONTROL_FLOW = [
+  { name: "1 PAS payment", detail: "from any Products wallet" },
+  { name: "Actuator contract", detail: "triggerNonce + 1 on Asset Hub" },
+  { name: "GRANDPA finality", detail: "Paseo relay chain" },
+  { name: "ESP32 light client", detail: "verifies every proof itself" },
+  { name: "Relay · fan", detail: "GPIO18 · 60 s" },
+];
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(resolve, reject).finally(() => window.clearTimeout(timeout));
-  });
-}
+const EVIDENCE = [
+  {
+    title: "Continuous telemetry",
+    body: "DHT11 readings travelled from the ESP32 through the desktop gateway and Celerity to remote Products clients for more than 30 hours without a backend. Clients mark a signal LIVE, STALE or NO SIGNAL from its age.",
+  },
+  {
+    title: "Finality verified on the device",
+    body: "The ESP32 checks Ed25519 GRANDPA justifications against an authority set it already trusts and requires strictly more than two thirds of the weight. RPC nodes and peers only supply bytes.",
+  },
+  {
+    title: "A proof chain down to one slot",
+    body: "Relay state root → Paras.Heads(1000) → Asset Hub header → contract info with a pinned trie id → child trie slot 0 → the nonce. A proof for any other contract is rejected.",
+  },
+  {
+    title: "Authority-set rotations",
+    body: "Scheduled GRANDPA set changes are derived on the device and committed to flash with A/B slots and readback. The 248→249 rotation is fixture-tested; 250→251 was followed live on the bench.",
+  },
+  {
+    title: "Warp sync over libp2p",
+    body: "When its anchor falls too far behind, the device recovers over plain-TCP libp2p with Noise XX, Yamux and PeerId enforcement, verifying every warp fragment before it trusts it.",
+  },
+  {
+    title: "Payment to physical pulse",
+    body: "Paying exactly 1 PAS increments the contract nonce. The ESP32 verifies the new nonce, writes it to flash before driving the pin, and holds the fan for 60 seconds. Replays and lower nonces are refused.",
+  },
+];
 
-function ageLabel(timestamp: number | null, now: number): string {
-  if (timestamp === null) return "—";
-  const seconds = Math.max(0, Math.floor((now - timestamp) / 1_000));
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  return `${Math.floor(seconds / 60)}m ago`;
-}
+const FIRMWARE_FACTS = [
+  { label: "Flash", value: "77.3% of 1.31 MB" },
+  { label: "Static RAM", value: "124 KB of 320 KB" },
+  { label: "Native tests", value: "10 / 10 passing" },
+  { label: "Contract", value: "0x0863…3374 · para 1000" },
+];
 
-function allowanceLabel(state: AllowanceState): string {
-  switch (state) {
-    case "assumed": return "ASSUMED — VERIFYING";
-    case "not-requested": return "NOT REQUESTED";
-    case "requesting": return "REQUESTING — CONFIRM IN HOST";
-    case "allocated": return "ALLOCATED";
-    case "rejected": return "REJECTED";
-    case "not-available": return "NOT AVAILABLE";
-    case "unverified": return "RESPONSE UNREADABLE — VERIFY BY PUBLISHING";
-    case "implicit": return "IMPLICIT HOST PROVISIONING";
-    case "error": return "ERROR";
-  }
-}
+const CANNOT_ACTUATE = [
+  "An RPC response",
+  "A P2P peer",
+  "An HTTP request",
+  "Celerity",
+  "industrial.dot",
+  "A reboot",
+  "A claimed nonce",
+];
 
-function isMissingAllowanceError(message: string): boolean {
-  return /no allowance|missing allowance|allowance (?:is )?not (?:set|found|allocated)/i.test(
-    message,
+const PRIVATE_INPUTS = [
+  "Raw sensor trace for the batch",
+  "Recipe setpoints and ramp profile",
+  "Cycle timing and tolerances",
+  "Line and equipment configuration",
+];
+
+const PUBLIC_OUTPUTS = [
+  "Commitment to the trace, anchored on chain",
+  "The predicate and spec version it was checked against",
+  "Batch identifier and time window",
+  "Pass, plus a proof anyone can verify",
+];
+
+const HAVE_ALREADY = [
+  "A device that verifies chain state on its own instead of trusting a server",
+  "An on-chain anchor on Asset Hub that the device reads through proofs",
+  "A signed path that carries telemetry off the shop floor",
+];
+
+const STILL_MISSING = [
+  "Readings signed by the device. Today the Products host signs the publication; the ESP32 does not sign its readings.",
+  "A commitment scheme for long, high-rate time series",
+  "A choice of proof system and circuit for range, duration and ordering predicates",
+  "Where the prover runs: the gateway, not the microcontroller, is the realistic first host",
+  "Proof verification on PolkaVM, or off-chain verification by the auditor",
+  "Metadata leakage: how often proofs appear can still reveal throughput",
+];
+
+const ROADMAP: { status: Status; title: string; items: string[] }[] = [
+  {
+    status: "tested",
+    title: "Now",
+    items: [
+      "DHT11 → ESP32 → gateway → Celerity telemetry",
+      "Paid trigger on the Asset Hub contract",
+      "On-device GRANDPA and trie-proof verification",
+      "Authority-set rotation and warp-sync recovery",
+      "Replay-safe, persisted actuator nonce",
+    ],
+  },
+  {
+    status: "next",
+    title: "Next",
+    items: [
+      "Readings signed by the ESP32 itself",
+      "State proofs over P2P instead of public RPC",
+      "Peer discovery and RPC failover",
+      "Measured stack and heap margins",
+    ],
+  },
+  {
+    status: "research",
+    title: "Research",
+    items: [
+      "Zero-knowledge proofs of process compliance",
+      "On-chain commitments to private process traces",
+      "Verifying proofs on PolkaVM",
+      "Limiting what proof metadata reveals",
+    ],
+  },
+];
+
+function Flow({ steps }: { steps: { name: string; detail: string }[] }) {
+  return (
+    <ol className="flow">
+      {steps.map((step) => (
+        <li key={step.name} className="flowStep">
+          <strong>{step.name}</strong>
+          <span>{step.detail}</span>
+        </li>
+      ))}
+    </ol>
   );
 }
 
 export default function Home() {
-  const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [connection, setConnection] = useState<ConnectionState>("connecting");
-  const [connectionDetail, setConnectionDetail] = useState("Detecting Polkadot Products host…");
-  const [latest, setLatest] = useState<EventRow | null>(null);
-  const [events, setEvents] = useState<EventRow[]>([]);
-  const [physicalReading, setPhysicalReading] = useState<HttpSensorReading | null>(null);
-  const [allowance, setAllowance] = useState<AllowanceState>("assumed");
-  const [allocating, setAllocating] = useState(false);
-  const [autoPublish, setAutoPublish] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [lastPublishAt, setLastPublishAt] = useState<number | null>(null);
-  const [lastPublishResult, setLastPublishResult] = useState("NOT TESTED");
-  const [now, setNow] = useState(() => Date.now());
-  const [diagnostics, setDiagnostics] = useState<DiagnosticState>({
-    host: "CHECKING",
-    statementStore: "NOT CONNECTED",
-    subscription: "INACTIVE",
-    sensorHttp: "CHECKING",
-    publish: "NOT TESTED",
-    lastReceived: "—",
-  });
-  const clientRef = useRef<StatementStoreClient | null>(null);
-  const connectingRef = useRef(false);
-  const lastCelerityReceivedAtRef = useRef(0);
-  const physicalReadingRef = useRef<HttpSensorReading | null>(null);
-  // The receiver ages a statement from its arrival time, so republishing a
-  // value the ESP32 no longer stands behind would show stale data as LIVE.
-  const physicalReadingIsCurrentRef = useRef(false);
-  const publishInFlightRef = useRef(false);
-  // Backoff only. It delays the next attempt; it must never become the sole
-  // path to one, or a publish that keeps failing before it reaches the network
-  // leaves the gateway with nothing driving it.
-  const publishRetryAtRef = useRef(0);
-  const lastForcedRecoveryRef = useRef(Date.now());
-  // Auto publish being off is only meaningful if the operator chose it. Off
-  // because it was never armed, or because a reconnect lost it, is a fault the
-  // gateway has to repair by itself.
-  const autoPublishOffByOperatorRef = useRef(false);
-  // Nonce, actuator state and the heartbeat clock, kept across local polls.
-  const observedRef = useRef(createObservedState());
-  const initialPublishAttemptRef = useRef(false);
+  return <ViewSwitch overview={<Overview />} />;
+}
 
-  const updateDiagnostic = useCallback((key: keyof DiagnosticState, value: string) => {
-    setDiagnostics((current) => ({ ...current, [key]: value }));
-  }, []);
-
-  const recordCelerityReading = useCallback((
-    reading: SensorReading,
-    receivedAt: number,
-    signer?: string,
-  ) => {
-    const received: EventRow = { ...reading, receivedAt, signer };
-
-    setLatest((current) => mergeLatest(current, received));
-
-    setEvents((current) => {
-      const existing = current.find(
-        (event) => event.sensor === received.sensor && event.timestamp === received.timestamp,
-      );
-      const merged: EventRow = {
-        ...received,
-        receivedAt: existing?.receivedAt ?? receivedAt,
-        signer: signer ?? existing?.signer,
-      };
-
-      return [
-        merged,
-        ...current.filter(
-          (event) => event.sensor !== received.sensor || event.timestamp !== received.timestamp,
-        ),
-      ]
-        .sort((left, right) => right.timestamp - left.timestamp)
-        .slice(0, MAX_EVENTS);
-    });
-
-    updateDiagnostic("lastReceived", new Date(receivedAt).toLocaleTimeString());
-  }, [updateDiagnostic]);
-
-  const handlePhysicalReading = useCallback((reading: HttpSensorReading) => {
-    physicalReadingRef.current = reading;
-    physicalReadingIsCurrentRef.current = true;
-    setPhysicalReading(reading);
-  }, []);
-
-  const handleSensorStatus = useCallback((status: LocalSensorStatus, detail: string) => {
-    // Preserve the last outcome during a retry instead of hiding the failure
-    // behind a transient READING label every second.
-    if (status !== "reading") updateDiagnostic("sensorHttp", detail);
-
-    // A sensor that has nothing to report, or that dropped off the network,
-    // pauses publishing; it does not end it. Auto publish stays armed so the
-    // gateway resumes on its own once a fresh reading arrives.
-    if (status === "no-reading" || status === "error") {
-      physicalReadingIsCurrentRef.current = false;
-    }
-
-    if (status === "error") {
-      physicalReadingRef.current = null;
-      // Keep the gateway diagnostics visible with the last known reading.
-      // The current-reading flag and ref above still block stale publishing.
-    }
-  }, [updateDiagnostic]);
-
-  useEffect(() => {
-    const ticker = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(ticker);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    connectingRef.current = true;
-    let hostWasDetected = false;
-    let client: StatementStoreClient | null = null;
-    let subscription: { unsubscribe: () => void } | undefined;
-
-    async function boot() {
-      try {
-        setConnection("connecting");
-        setConnectionDetail("Detecting Polkadot Products host…");
-
-        const hostDetected = await withTimeout(
-          isInsideContainer(),
-          HOST_TIMEOUT_MS,
-          "Products host detection timed out.",
-        );
-        if (!hostDetected) {
-          throw new Error(
-            "Polkadot Products host was not detected. Open industrial.dot inside a Products container.",
-          );
-        }
-        if (cancelled) return;
-        hostWasDetected = true;
-        updateDiagnostic("host", "DETECTED");
-        setConnectionDetail("Connecting to Celerity / Statement Store in host mode…");
-
-        const transport = await withTimeout(
-          createSharedHostTransport(),
-          STORE_TIMEOUT_MS,
-          "Statement Store host transport timed out.",
-        );
-        if (cancelled) return;
-        client = new StatementStoreClient({
-          appName: APP_NAME,
-          defaultTtlSeconds: STATEMENT_TTL_SECONDS,
-          transport,
-        });
-        clientRef.current = client;
-
-        // connect() starts receiving immediately, including stored statements.
-        // Register first so the SDK does not mark the initial reading as seen
-        // before this receiver has a chance to process it.
-        subscription = client.subscribe<SensorReading>(
-          (statement) => {
-            if (cancelled) return;
-            if (!isSensorReading(statement.data)) {
-              console.warn("[industrial] Ignored malformed or unrelated statement", statement.data);
-              return;
-            }
-
-            recordCelerityReading(statement.data, Date.now(), statement.signerHex);
-            lastCelerityReceivedAtRef.current = Date.now();
-          },
-          { topic2: TOPIC_2 },
-        );
-
-        await withTimeout(
-          client.connect({ mode: "host" }),
-          STORE_TIMEOUT_MS,
-          "Statement Store timed out. The Products host did not answer.",
-        );
-        if (cancelled) return;
-        updateDiagnostic("statementStore", "CONNECTED (HOST MODE)");
-
-        updateDiagnostic("subscription", "ACTIVE");
-        setConnection("connected");
-        setConnectionDetail(`Celerity connected; subscribed to ${SENSOR_NAME}`);
-      } catch (error) {
-        console.error("[industrial] Celerity boot failed", error);
-        if (cancelled) return;
-        subscription?.unsubscribe();
-        client?.destroy();
-        if (clientRef.current === client) clientRef.current = null;
-        setConnection("error");
-        setConnectionDetail(statementErrorMessage(error));
-        if (!hostWasDetected) updateDiagnostic("host", "NOT DETECTED");
-        updateDiagnostic("statementStore", `ERROR: ${statementErrorMessage(error)}`);
-      } finally {
-        if (!cancelled) connectingRef.current = false;
-      }
-    }
-
-    void boot();
-
-    return () => {
-      cancelled = true;
-      connectingRef.current = false;
-      subscription?.unsubscribe();
-      client?.destroy();
-      if (clientRef.current === client) clientRef.current = null;
-    };
-  }, [connectionAttempt, recordCelerityReading, updateDiagnostic]);
-
-  useEffect(() => watchCelerityConnection({
-    lastReceivedAt: () => lastCelerityReceivedAtRef.current,
-    reconnect: () => {
-      // Let an active connection or publish finish before replacing its client.
-      if (connectingRef.current || publishInFlightRef.current) return false;
-      connectingRef.current = true;
-      setConnectionAttempt((attempt) => attempt + 1);
-      return true;
-    },
-  }), []);
-
-  const requestAllowance = useCallback(async () => {
-    if (
-      allowance === "assumed" ||
-      allowance === "requesting" ||
-      allowance === "allocated" ||
-      allowance === "implicit" ||
-      allowance === "not-available" ||
-      allowance === "unverified"
-    ) {
-      return;
-    }
-
-    if (connection !== "connected" || !clientRef.current?.isConnected()) {
-      setAllowance("error");
-      setLastPublishResult("StatementConnectionError: Statement Store is not connected");
-      return;
-    }
-
-    setAllocating(true);
-    setAllowance("requesting");
-
-    try {
-      const allocationResult = await withTimeout(
-        requestResourceAllocation([
-          { tag: "StatementStoreAllowance", value: undefined },
-        ]),
-        ALLOWANCE_TIMEOUT_MS,
-        "Statement Store allowance request timed out. Confirm it in the Products host.",
-      );
-
-      if (!allocationResult.ok) throw allocationResult.error;
-      const outcome = allocationResult.value[0];
-
-      switch (outcome) {
-        case "Allocated":
-          setAllowance("allocated");
-          setAutoPublish(true);
-          break;
-        case "Rejected":
-          setAllowance("rejected");
-          break;
-        case "NotAvailable":
-          setAllowance("not-available");
-          break;
-        default:
-          throw new Error(`Unexpected allocation outcome: ${serializeUnknown(outcome)}`);
-      }
-    } catch (error) {
-      console.error("[industrial] Statement Store allowance request failed", error);
-      const message = errorMessage(error);
-      if (message.includes("Unknown enum discriminant")) {
-        setAllowance("unverified");
-        setLastPublishResult(
-          "ALLOCATION RESPONSE UNREADABLE — USE PUBLISH CURRENT READING TO VERIFY THE APPROVED ALLOWANCE",
-        );
-      } else {
-        setAllowance("error");
-        setLastPublishResult(`ALLOWANCE ERROR: ${message}`);
-      }
-    } finally {
-      setAllocating(false);
-    }
-  }, [allowance, connection]);
-
-  const publishCurrentReading = useCallback(async (trigger: PublishReason | "manual") => {
-    if (publishInFlightRef.current) return false;
-
-    const client = clientRef.current;
-    const current = physicalReadingRef.current;
-
-    if (!client?.isConnected()) {
-      const message = "StatementConnectionError: Statement Store is not connected";
-      setLastPublishResult(message);
-      updateDiagnostic("publish", message);
-      return false;
-    }
-    if (
-      !current ||
-      !physicalReadingIsCurrentRef.current ||
-      !Number.isFinite(current.temperature) ||
-      !Number.isFinite(current.humidity) ||
-      !Number.isFinite(current.timestamp) ||
-      Date.now() - current.timestamp >= LIVE_UNTIL_MS
-    ) {
-      const message = "REJECTED: NO VALID PHYSICAL SENSOR READING";
-      setLastPublishResult(message);
-      updateDiagnostic("publish", message);
-      return false;
-    }
-
-    const reading = toSensorReading(current, trigger);
-
-    publishInFlightRef.current = true;
-    setPublishing(true);
-    setLastPublishResult(`${trigger.toUpperCase()} SUBMISSION IN PROGRESS`);
-    updateDiagnostic("publish", `${trigger.toUpperCase()} SUBMISSION IN PROGRESS`);
-
-    try {
-      const result = await withTimeout(
-        client.publish(reading, {
-          topic2: TOPIC_2,
-          channel: CHANNEL,
-          ttlSeconds: STATEMENT_TTL_SECONDS,
-        }),
-        STORE_TIMEOUT_MS,
-        "Statement Store publish timed out.",
-      );
-
-      if (!result.ok) throw result.error;
-
-      const acceptedAt = Date.now();
-      publishRetryAtRef.current = 0;
-      console.info("[industrial] Statement Store publish accepted", { trigger, reading });
-      setLastPublishAt(acceptedAt);
-      setLastPublishResult("ACCEPTED");
-      updateDiagnostic("publish", "ACCEPTED");
-      recordCelerityReading(reading, acceptedAt);
-      setAllowance((currentAllowance) =>
-        currentAllowance === "allocated" ? currentAllowance : "implicit",
-      );
-      return true;
-    } catch (error) {
-      const message = statementErrorMessage(error);
-      console.error("[industrial] Statement Store publish failed", error);
-      setLastPublishResult(message);
-      updateDiagnostic("publish", `ERROR: ${message}`);
-      // Only an error that actually names the allowance says anything about
-      // it. Demoting on any failure - a timeout, a moment without a socket -
-      // was enough to convince the app the host would refuse, which then
-      // blocked arming, blocked recovery and disabled the auto-publish control,
-      // while a manual publish went through and proved the belief wrong.
-      if (isMissingAllowanceError(message)) setAllowance("not-requested");
-      // Keep the user's auto-publish choice armed, including while the host
-      // restores allowance, and back off before trying again. The retry itself
-      // is the ordinary heartbeat: decidePublish already adopted this snapshot,
-      // so the next heartbeat carries the same complete state within 10s.
-      publishRetryAtRef.current = Date.now() + HEARTBEAT_INTERVAL_MS;
-      return false;
-    } finally {
-      publishInFlightRef.current = false;
-      setPublishing(false);
-    }
-  }, [recordCelerityReading, updateDiagnostic]);
-
-  useEffect(() => {
-    if (
-      initialPublishAttemptRef.current ||
-      isAllowanceRefused(allowance) ||
-      connection !== "connected" ||
-      !physicalReading
-    ) {
-      return;
-    }
-
-    // Arming is enough: the scheduling effect below treats the next snapshot as
-    // a due heartbeat and sends it, so start-up produces one message, not two.
-    initialPublishAttemptRef.current = true;
-    setAutoPublish(true);
-  }, [allowance, connection, physicalReading]);
-
-  // One decision per local snapshot, so a nonce step and the actuator switching
-  // on in the same reading cost one message rather than two. decidePublish
-  // adopts the snapshot as it decides, which also makes a re-run for the same
-  // reading a no-op when an unrelated render retriggers this effect.
-  useEffect(() => {
-    if (
-      !autoPublish ||
-      connection !== "connected" ||
-      publishing ||
-      !physicalReading ||
-      !physicalReadingIsCurrentRef.current ||
-      Date.now() - physicalReading.timestamp >= LIVE_UNTIL_MS ||
-      Date.now() < publishRetryAtRef.current
-    ) return;
-
-    const decision = decidePublish(
-      observedRef.current,
-      physicalReading,
-      Date.now(),
-      HEARTBEAT_INTERVAL_MS,
-    );
-    if (!decision.publish) return;
-
-    void publishCurrentReading(decision.reason);
-  }, [autoPublish, connection, physicalReading, publishing, publishCurrentReading, now]);
-
-  // Supervisor, and deliberately not a diagnosis.
-  //
-  // A successful publish is the only thing that refreshes this device's own
-  // view of the signal, so when publishing stops while everything it depends on
-  // still looks healthy - connected, armed, a current reading - nothing else
-  // notices and the page sits at NO SIGNAL until someone reloads it. Rather
-  // than enumerate the ways that can happen, reopen the heartbeat window and
-  // let the ordinary path try again. Once every three intervals, so a host that
-  // is genuinely refusing is not hammered.
-  useEffect(() => {
-    const recovery = decideRecovery({
-      connected: connection === "connected",
-      hasCurrentReading: Boolean(physicalReading) && physicalReadingIsCurrentRef.current,
-      allowanceRefused: isAllowanceRefused(allowance),
-      autoPublish,
-      offByOperator: autoPublishOffByOperatorRef.current,
-      lastPublishAt,
-      lastRecoveryAt: lastForcedRecoveryRef.current,
-      now,
-    });
-    if (recovery === "none") return;
-
-    lastForcedRecoveryRef.current = now;
-    observedRef.current.lastHeartbeatAt = undefined;
-    publishRetryAtRef.current = 0;
-
-    if (recovery === "rearm") {
-      initialPublishAttemptRef.current = true;
-      setAutoPublish(true);
-      updateDiagnostic("publish", "AUTO PUBLISH WAS OFF — RE-ARMED");
-      return;
-    }
-    updateDiagnostic("publish", "NO PUBLISH IN 30s — REOPENING THE HEARTBEAT");
-  }, [autoPublish, allowance, connection, physicalReading, lastPublishAt, now, updateDiagnostic]);
-
-  function toggleAutoPublish() {
-    if (autoPublish) {
-      autoPublishOffByOperatorRef.current = true;
-      setAutoPublish(false);
-      return;
-    }
-    autoPublishOffByOperatorRef.current = false;
-    if (connection !== "connected") {
-      const message = "ENABLE FAILED: STATEMENT STORE NOT CONNECTED";
-      setLastPublishResult(message);
-      updateDiagnostic("publish", message);
-      return;
-    }
-    if (!physicalReadingRef.current) {
-      const message = "ENABLE FAILED: NO VALID PHYSICAL SENSOR READING";
-      setLastPublishResult(message);
-      updateDiagnostic("publish", message);
-      return;
-    }
-    if (isAllowanceRefused(allowance)) {
-      const message = "ENABLE CELERITY BEFORE AUTO PUBLISH";
-      setLastPublishResult(message);
-      updateDiagnostic("publish", message);
-      return;
-    }
-    setAutoPublish(true);
-  }
-
-  const signalAge = latest ? Math.max(0, now - latest.receivedAt) : null;
-  const signalLabel = useMemo(() => {
-    if (connection !== "connected") return connection === "connecting" ? "CONNECTING" : "OFFLINE";
-    if (signalAge === null || signalAge > STALE_UNTIL_MS) return "NO SIGNAL";
-    if (signalAge >= LIVE_UNTIL_MS) return "STALE";
-    return "LIVE";
-  }, [connection, signalAge]);
-
-  const allowanceStatusClass =
-    allowance === "allocated" || allowance === "implicit"
-      ? "status-live"
-      : allowance === "assumed" || allowance === "requesting"
-        ? "status-connecting"
-        : allowance === "rejected" || allowance === "error"
-          ? "status-offline"
-          : "status-no-signal";
-
+function Overview() {
   return (
-    <main className="shell">
+    <main className="shell home">
       <header className="topbar">
         <div>
-          <div className="eyebrow">INDUSTRIAL · LIVE MONITORING</div>
+          <div className="eyebrow">INDUSTRIAL.DOT · POLKADOT</div>
           <h1>industrial</h1>
         </div>
-        <div className={`status status-${signalLabel.toLowerCase().replace(" ", "-")}`}>
-          <span className="dot" />
-          {signalLabel}
+        <div className="siteLinks">
+          <nav aria-label="Sections">
+            <a href="#how">How it works</a>
+            <a href="#evidence">Evidence</a>
+            <a href="#privacy">Process privacy</a>
+            <a href="#roadmap">Roadmap</a>
+          </nav>
+          <a className="navCta" href="#lab">Live Lab →</a>
         </div>
       </header>
 
-      {signalLabel !== "LIVE" ? <section className="panel demoNotice" role="status">
-        <div className="demoNoticeStatus">
-          <span className="dot" />
-          BROADCAST ENDED
+      <section className="homeHero" aria-labelledby="hero-title">
+        <h2 id="hero-title">Infrastructure for Industry</h2>
+        <p className="heroPillars">
+          Decentralized Architecture. Privacy by Design. Verified Actions.
+        </p>
+        <p className="lead">
+          A shared layer designed to integrate across industries — without relying on trusted
+          central servers.
+        </p>
+        <p className="lead">
+          Secure authentication, decentralized communication through Celerity, cryptographically
+          verified actions, and tamper-evident command histories.
+        </p>
+        <p className="lead">
+          From machines acting on verified commands to proving product quality without revealing
+          proprietary processes, we’re exploring a new foundation for industrial automation,
+          quality assurance, and digital product passports.
+        </p>
+        <p className="heroClosing">
+          Protect industrial know-how. Verify processes. Connect businesses without intermediaries.
+        </p>
+
+        <div className="legend" aria-label="How claims on this page are labelled">
+          <div><Tag status="tested" /><p>Built, run on the bench, and evidenced.</p></div>
+          <div><Tag status="next" /><p>Known engineering work. Not built yet.</p></div>
+          <div><Tag status="research" /><p>A direction under investigation. No code exists.</p></div>
         </div>
-        <div>
-          <span className="eyebrow">DEMONSTRATION COMPLETED</span>
+
+        <dl className="statStrip">
+          {HERO_STATS.map((stat) => (
+            <div key={stat.value}>
+              <dt>{stat.label}</dt>
+              <dd>{stat.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section id="how" className="homeSection" aria-labelledby="how-title">
+        <div className="sectionIntro">
+          <span className="eyebrow">HOW IT WORKS</span>
+          <h2 id="how-title">Two loops, one trust boundary</h2>
           <p>
-            The ESP32 acts as a light client, watching the smart contract&apos;s finalized
-            trigger nonce. When the nonce increases, it activates the actuator. Temperature,
-            humidity, the observed nonce, and actuator state are broadcast through Polkadot
-            Celerity.
+            Telemetry and control travel separate paths. Observation flows outward through
+            Celerity; activation only ever comes from state the device has proven for itself.
           </p>
         </div>
-      </section> : null}
 
-      <LocalSensorTest
-        onReading={handlePhysicalReading}
-        onStatusChange={handleSensorStatus}
-      />
+        <div className="loopGrid">
+          <article className="panel loopPanel">
+            <div className="sectionHeading">
+              <div><span className="eyebrow">TELEMETRY LOOP</span><h3>Bench to phone</h3></div>
+              <Tag status="tested" />
+            </div>
+            <Flow steps={TELEMETRY_FLOW} />
+          </article>
+          <article className="panel loopPanel">
+            <div className="sectionHeading">
+              <div><span className="eyebrow">CONTROL LOOP</span><h3>Payment to relay</h3></div>
+              <Tag status="tested" />
+            </div>
+            <Flow steps={CONTROL_FLOW} />
+          </article>
+        </div>
+        <p className="note">
+          Celerity is observation only. The ESP32 firmware has no Celerity client and no HTTP
+          write route, so nothing published there can reach the relay.
+        </p>
+      </section>
 
-      {physicalReading ? <section className="panel gatewayPanel">
-        <div className="sectionHeading">
-          <div><span className="eyebrow">CELERITY GATEWAY</span><h2>Desktop publisher</h2></div>
-          <div className={`status ${allowanceStatusClass}`}>
-            <span className="dot" />
-            {allowanceLabel(allowance)}
+      <section id="evidence" className="homeSection" aria-labelledby="evidence-title">
+        <div className="sectionIntro">
+          <Tag status="tested" />
+          <h2 id="evidence-title">What has actually run</h2>
+          <p>
+            Each item below has run on the ESP32 on the bench against the public Paseo network,
+            not in a simulator.
+          </p>
+        </div>
+
+        <div className="evidenceGrid">
+          {EVIDENCE.map((item) => (
+            <article key={item.title} className="panel evidenceCard">
+              <h3>{item.title}</h3>
+              <p>{item.body}</p>
+            </article>
+          ))}
+        </div>
+
+        <dl className="factStrip">
+          {FIRMWARE_FACTS.map((fact) => (
+            <div key={fact.label}>
+              <dt>{fact.label}</dt>
+              <dd>{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+
+        <div className="panel invariantPanel">
+          <div>
+            <span className="eyebrow">SECURITY INVARIANT</span>
+            <h3>None of these can move the relay</h3>
+            <p>
+              Each can only supply bytes that the device verifies again, or be ignored. The pin
+              moves only for a finalized, proven nonce higher than the one already stored.
+            </p>
           </div>
-        </div>
-
-        <div className="gatewayActions">
-          <button
-            className="primaryButton"
-            onClick={() => void requestAllowance()}
-            disabled={
-              allocating ||
-              connection !== "connected" ||
-              allowance === "assumed" ||
-              allowance === "allocated" ||
-              allowance === "implicit" ||
-              allowance === "not-available" ||
-              allowance === "unverified"
-            }
-          >
-            {allocating
-              ? "REQUESTING…"
-              : allowance === "assumed"
-                ? "VERIFYING ALLOWANCE…"
-                : allowance === "allocated" || allowance === "implicit"
-                  ? "CELERITY ENABLED"
-                  : allowance === "not-available" || allowance === "unverified"
-                    ? "VERIFY WITH MANUAL PUBLISH"
-                    : "ENABLE CELERITY"}
-          </button>
-          <button
-            className={autoPublish ? "toggleButton toggleButtonOn" : "toggleButton"}
-            onClick={toggleAutoPublish}
-            aria-pressed={autoPublish}
-            disabled={
-              !autoPublish && (connection !== "connected" || isAllowanceRefused(allowance))
-            }
-          >
-            AUTO PUBLISH · {autoPublish ? "ON" : "OFF"}
-          </button>
-          <button
-            className="secondaryActionButton"
-            onClick={() => void publishCurrentReading("manual")}
-            disabled={publishing || connection !== "connected" || !physicalReading}
-          >
-            {publishing ? "PUBLISHING…" : "PUBLISH CURRENT READING"}
-          </button>
-        </div>
-
-        <div className="gatewayGrid">
-          <div><span>Allowance</span><strong>{allowanceLabel(allowance)}</strong></div>
-          <div><span>Host mode</span><strong>{connection === "connected" ? "CONNECTED" : connection.toUpperCase()}</strong></div>
-          <div><span>Auto publish</span><strong>{autoPublish ? "ON" : "OFF"}</strong></div>
-          <div><span>Publish interval</span><strong>{HEARTBEAT_INTERVAL_MS / 1_000} SEC</strong></div>
-          <div><span>Last physical reading</span><strong>{ageLabel(physicalReading?.timestamp ?? null, now)}</strong></div>
-          <div><span>Last Celerity publish</span><strong>{ageLabel(lastPublishAt, now)}</strong></div>
-          <div className="gatewayResult"><span>Result</span><strong>{lastPublishResult}</strong></div>
-        </div>
-      </section> : null}
-
-      <section className="hero panel">
-        <div className="heroTitle">
-          <span>CELERITY LIVE · REMOTE RECEIVER</span>
-          <strong>{SENSOR_ID}</strong>
-        </div>
-        <div className="metrics">
-          <div className="metric">
-            <span>Temperature</span>
-            <strong>{latest ? latest.temperature.toFixed(1) : "—"}<small> °C</small></strong>
-          </div>
-          <div className="metric">
-            <span>Humidity</span>
-            <strong>{latest ? latest.humidity.toFixed(1) : "—"}<small> %</small></strong>
-          </div>
-        </div>
-        <div className="heroActuator">
-          <div><span>ACTUATOR-01 state</span><strong className={latest?.actuatorState === "ON" ? "actuatorOn" : "actuatorOff"}>{latest?.actuatorState ?? "—"}</strong></div>
-          <div><span>Last trigger observed by device</span><strong>{latest?.actuatorNonce === undefined ? "—" : `#${latest.actuatorNonce}`}</strong></div>
-        </div>
-        <div className="metaGrid">
-          <div><span>Namespace</span><strong>{APP_NAME}</strong></div>
-          <div><span>Topic</span><strong>{TOPIC_2}</strong></div>
-          <div><span>Received</span><strong>{ageLabel(latest?.receivedAt ?? null, now)}</strong></div>
-          <div><span>Signals received</span><strong>{events.length}</strong></div>
+          <ul className="chipList">
+            {CANNOT_ACTUATE.map((item) => <li key={item}>{item}</li>)}
+          </ul>
         </div>
       </section>
 
-      <ActuatorPanel
-        deviceNonce={latest?.actuatorNonce}
-        deviceState={latest?.actuatorState}
-      />
-
-      {physicalReading ? <section className="panel connectionPanel">
-        <div><span className="label">Connection</span><strong>{connectionDetail}</strong></div>
-        <div><span className="label">Products host detected</span><code>{diagnostics.host}</code></div>
-        <div><span className="label">Statement Store</span><code>{diagnostics.statementStore}</code></div>
-        <div><span className="label">Subscription</span><code>{diagnostics.subscription}</code></div>
-        <div><span className="label">Statement Store allowance</span><code>{allowanceLabel(allowance)}</code></div>
-        <div><span className="label">Sensor HTTP status</span><code>{diagnostics.sensorHttp}</code></div>
-        <div><span className="label">Last physical reading</span><code>{ageLabel(physicalReading?.timestamp ?? null, now)}</code></div>
-        <div><span className="label">Auto publish</span><code>{autoPublish ? "ON" : "OFF"}</code></div>
-        <div><span className="label">Last publish result</span><code>{diagnostics.publish}</code></div>
-        <div><span className="label">Last received statement</span><code>{diagnostics.lastReceived}</code></div>
-        <div><span className="label">Signals received</span><code>{events.length}</code></div>
-      </section> : null}
-
-      <section className="panel eventPanel">
-        <div className="sectionHeading">
-          <div><span className="eyebrow">RECENT CELERITY SIGNALS</span><h2>Statement Store feed</h2></div>
-          <span>{events.length}/{MAX_EVENTS}</span>
+      <section id="privacy" className="homeSection privacySection" aria-labelledby="privacy-title">
+        <div className="sectionIntro">
+          <Tag status="research" />
+          <span className="eyebrow">PROCESS PRIVACY</span>
+          <h2 id="privacy-title">Prove the process was compliant without revealing it.</h2>
+          <p>
+            Auditors, customers and regulators want proof that a batch was made within
+            specification. The evidence they ask for is raw time series, setpoints, ramp
+            profiles and cycle timing, and that is often the know-how itself. Handing it over
+            to prove compliance gives away the competitive moat it was meant to protect.
+          </p>
         </div>
-        {events.length === 0 ? (
-          <div className="empty">
-            <strong>Waiting for {SENSOR_NAME}…</strong>
-            <span>Subscribed to appName “{APP_NAME}” and topic2 “{TOPIC_2}”.</span>
+
+        <div className="tradeoffGrid">
+          <div className="panel tradeoff">
+            <span className="eyebrow">SHARE THE DATA</span>
+            <p><b className="good">Compliance proven</b><b className="bad">Know-how exposed</b></p>
           </div>
-        ) : (
-          <div className="tableWrap">
-            <table>
-              <thead><tr><th>Received</th><th>Temperature</th><th>Humidity</th><th>Actuator</th><th>Trigger</th><th>Sensor time</th><th>Signer</th></tr></thead>
-              <tbody>
-                {events.map((event, index) => (
-                  <tr key={`${event.receivedAt}-${index}`}>
-                    <td>{new Date(event.receivedAt).toLocaleTimeString()}</td>
-                    <td>{event.temperature.toFixed(1)} °C</td>
-                    <td>{event.humidity.toFixed(1)} %</td>
-                    <td>{event.actuatorState ?? "—"}</td>
-                    <td>{event.actuatorNonce === undefined ? "—" : `#${event.actuatorNonce}`}</td>
-                    <td>{new Date(event.timestamp).toLocaleTimeString()}</td>
-                    <td><code>{shortHex(event.signer)}</code></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="panel tradeoff">
+            <span className="eyebrow">WITHHOLD IT</span>
+            <p><b className="good">Know-how kept</b><b className="bad">Compliance taken on trust</b></p>
           </div>
-        )}
+          <div className="panel tradeoff tradeoffZk">
+            <span className="eyebrow">ZERO-KNOWLEDGE PROOF</span>
+            <p><b className="good">Compliance proven</b><b className="good">Know-how stays on site</b></p>
+          </div>
+        </div>
+
+        <div className="zkDiagram" role="group" aria-label="Proposed zero-knowledge compliance flow">
+          <div className="zkColumn zkPrivate">
+            <span className="eyebrow">PRIVATE · NEVER LEAVES THE SITE</span>
+            <ul>{PRIVATE_INPUTS.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+          <div className="zkProver">
+            <span className="eyebrow">PROVER ON THE GATEWAY</span>
+            <strong>Every committed reading in window W satisfies predicate P</strong>
+          </div>
+          <div className="zkColumn zkPublic">
+            <span className="eyebrow">PUBLIC · WHAT THE AUDITOR SEES</span>
+            <ul>{PUBLIC_OUTPUTS.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+        </div>
+
+        <div className="panel exampleGrid">
+          <div>
+            <span className="eyebrow">PUBLIC STATEMENT</span>
+            <p>&ldquo;Core temperature held at or above <b>72 °C</b> for at least <b>15 s</b>, for every unit in batch 0417.&rdquo;</p>
+            <small>The regulator&apos;s limit. Anyone can read it and check the proof against it.</small>
+          </div>
+          <div>
+            <span className="eyebrow">STAYS PRIVATE</span>
+            <p>That the line actually runs at 74.5 °C, with a two-stage ramp and an 18 s hold tuned for yield.</p>
+            <small>The part a competitor would pay for. The proof reveals none of it.</small>
+          </div>
+        </div>
+
+        <div className="claimGrid">
+          <div className="panel claimPanel">
+            <span className="eyebrow">A PROOF WOULD SHOW</span>
+            <ul>
+              <li>The committed trace satisfies the published predicate.</li>
+              <li>The trace is the one committed at production time, not a version edited afterwards.</li>
+              <li>Which specification version it was checked against.</li>
+            </ul>
+          </div>
+          <div className="panel claimPanel claimLimit">
+            <span className="eyebrow">A PROOF WOULD NOT SHOW</span>
+            <ul>
+              <li>That the sensor told the truth. A proof over fabricated readings is still a valid proof.</li>
+              <li>That the sensor was installed where the specification says it should be.</li>
+              <li>Anything about batches that were never committed.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div className="buildingBlocks">
+          <div className="panel">
+            <div className="sectionHeading">
+              <h3>What we can build on</h3>
+              <Tag status="tested" />
+            </div>
+            <ul>{HAVE_ALREADY.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+          <div className="panel researchPanel">
+            <div className="sectionHeading">
+              <h3>What does not exist yet</h3>
+              <Tag status="research" />
+            </div>
+            <ul>{STILL_MISSING.map((item) => <li key={item}>{item}</li>)}</ul>
+          </div>
+        </div>
+
+        <p className="note">
+          No zero-knowledge circuit, prover or verifier exists in this project today. This
+          section describes the problem we are investigating and the parts of the current
+          system it would rest on.
+        </p>
+      </section>
+
+      <section id="roadmap" className="homeSection" aria-labelledby="roadmap-title">
+        <div className="sectionIntro">
+          <span className="eyebrow">WHERE THE LINE IS</span>
+          <h2 id="roadmap-title">Tested, next, and research</h2>
+          <p>
+            Only the first column has run on hardware. The second is known engineering work.
+            The third is open research.
+          </p>
+        </div>
+        <div className="roadmapGrid">
+          {ROADMAP.map((column) => (
+            <article key={column.title} className={`panel roadmapColumn roadmap-${column.status}`}>
+              <div className="sectionHeading">
+                <h3>{column.title}</h3>
+                <Tag status={column.status} />
+              </div>
+              <ul>{column.items.map((item) => <li key={item}>{item}</li>)}</ul>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel labCta" aria-labelledby="lab-title">
+        <div>
+          <span className="eyebrow">LIVE LAB</span>
+          <h2 id="lab-title">Watch the bench</h2>
+          <p>
+            The Live Lab is the original console: live warehouse-01 readings over Celerity,
+            the desktop gateway and the paid actuator trigger. Sensor and gateway panels appear
+            only on a machine that can reach the bench ESP32. Publishing and payment need the
+            Polkadot Products host.
+          </p>
+        </div>
+        <a className="primaryButton linkButton" href="#lab">Open the Live Lab</a>
       </section>
 
       <footer>
-        Statement Store authenticates the Products host publisher; ESP32 device signing is not included yet.
+        Statement Store authenticates the Products host publisher; ESP32 device signing is not
+        included yet. Zero-knowledge process proofs are research and are not implemented.
       </footer>
     </main>
   );

@@ -5,9 +5,11 @@ import {
   type StatementTransport,
 } from "@parity/product-sdk-statement-store";
 
-// The default Statement Store transport loads its own, newer host SDK.
-// Both TrUAPI copies attach to the same mobile MessagePort and overwrite
-// port.onmessage. Use the application's host singleton, shared with signing.
+// Statement Store now resolves to the same host SDK build as the app, so the
+// two TrUAPI copies that used to fight over the mobile MessagePort are gone.
+// This still routes through the application's host singleton on purpose: the
+// shared connection has to outlive any single StatementStoreClient, so wallet
+// requests keep working when a client is replaced (see destroy() below).
 export async function createSharedHostTransport(): Promise<StatementTransport> {
   const store = await getStatementStore();
   if (!store) throw new StatementConnectionError("Host statement store unavailable.");
