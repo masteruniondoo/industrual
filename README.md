@@ -4,11 +4,12 @@ Industrial.dot is an IoT demonstration of real-time sensor-message delivery thro
 
 ## Pages
 
-- `/` — static overview ([app/page.tsx](app/page.tsx)): what has been tested on
-  hardware, the security invariant, the roadmap, and the Process Privacy
-  research direction (zero-knowledge proofs of process compliance). Every claim
-  is labelled *Tested on hardware*, *Engineering · not built* or
-  *Research · not built*; no ZK code exists in this project.
+- `/` — static overview ([app/page.tsx](app/page.tsx)), written as a document
+  with numbered sections: architecture, results on the bench, the security
+  invariant, the Process Privacy research direction (zero-knowledge proofs of
+  process compliance) and the roadmap. Every section states its status as
+  *tested on hardware*, *engineering, not built* or *research, not built*; no
+  ZK code exists in this project.
 - `/#lab` — the Live Lab ([app/LiveLab.tsx](app/LiveLab.tsx)), shown in place on
   the same page because the Products host loads the bundle as one document: the original
   interactive console with live Celerity readings, the desktop gateway and the
