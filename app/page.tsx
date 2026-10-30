@@ -15,10 +15,10 @@ const STATUS_LABEL: Record<Status, string> = {
   research: "research, not built",
 };
 
-function StatusLine({ status }: { status: Status }) {
+function StatusLine({ status, label }: { status: Status; label?: string }) {
   return (
     <p className="statusLine">
-      Status: <span className={`st st-${status}`}>{STATUS_LABEL[status]}</span>
+      Status: <span className={`st st-${status}`}>{label ?? STATUS_LABEL[status]}</span>
     </p>
   );
 }
@@ -33,22 +33,21 @@ const SECTIONS = [
 ];
 
 const SUMMARY = [
-  { label: "Continuous telemetry from the bench to remote phones", value: "> 30 h" },
-  { label: "GRANDPA weight checked on the ESP32 itself", value: "> 2/3" },
-  { label: "On-chain trigger, followed by one verified relay pulse", value: "1 PAS, 60 s" },
-  { label: "Backend servers, databases or cloud controllers", value: "none" },
+  { label: "GRANDPA quorum checked on the ESP32 itself", value: "strictly > 2/3 of weight" },
+  { label: "Verified on-chain trigger → relay pulse", value: "1 PAS (testnet), 60 s" },
+  { label: "Our own backend, database or trusted controller", value: "none" },
 ];
 
 const TELEMETRY_FLOW = [
   { name: "DHT11", detail: "Measures temperature and humidity." },
   { name: "ESP32", detail: "Reads the sensor over a wire and serves it at /sensor.txt." },
-  { name: "Desktop gateway", detail: "industrial.dot, running in the Products host." },
+  { name: "Desktop gateway", detail: "industrial.dot, running in the Products Desktop host; must stay online for telemetry." },
   { name: "Celerity", detail: "Carries signed Statement Store messages." },
-  { name: "Remote clients", detail: "Desktop, Android and iPhone." },
+  { name: "Remote clients", detail: "Desktop and Android." },
 ];
 
 const CONTROL_FLOW = [
-  { name: "Payment", detail: "1 PAS from any Products wallet." },
+  { name: "Payment", detail: "1 testnet PAS from any Products wallet." },
   { name: "Actuator contract", detail: "Increments triggerNonce on Asset Hub." },
   { name: "GRANDPA finality", detail: "Finalizes the block on the Paseo relay chain." },
   { name: "ESP32 light client", detail: "Verifies every proof itself." },
@@ -58,7 +57,7 @@ const CONTROL_FLOW = [
 const EVIDENCE = [
   {
     title: "Continuous telemetry",
-    body: "DHT11 readings travelled from the ESP32 through the desktop gateway and Celerity to remote Products clients for more than 30 hours without a backend. Clients mark a signal LIVE, STALE or NO SIGNAL from its age.",
+    body: "DHT11 readings travelled from the ESP32 through the desktop gateway and Celerity to remote Products clients without a backend of our own. Clients mark a signal LIVE, STALE or NO SIGNAL from its age.",
   },
   {
     title: "Finality verified on the device",
@@ -70,23 +69,23 @@ const EVIDENCE = [
   },
   {
     title: "Authority set rotations",
-    body: "Scheduled GRANDPA set changes are derived on the device and committed to flash with A/B slots and readback. The 248→249 rotation is fixture tested; 250→251 was followed live on the bench.",
+    body: "Scheduled GRANDPA set changes (delay 0, up to 64 authorities) are derived on the device and committed to flash with A/B slots. The 250→251 rotation was followed live on the bench. Unsupported transitions, such as forced changes, fail closed.",
   },
   {
     title: "Warp sync over libp2p",
-    body: "When its anchor falls too far behind, the device recovers over plain TCP libp2p with Noise XX, Yamux and PeerId enforcement, verifying every warp fragment before it trusts it.",
+    body: "When its anchor falls too far behind, the device recovers over plain TCP libp2p with Noise XX, Yamux and PeerId enforcement, verifying every warp fragment before it trusts it. This is a purpose-built verifier and minimal warp client with a fixed bootnode list, not a full light client.",
   },
   {
     title: "From payment to a physical pulse",
-    body: "Paying exactly 1 PAS increments the contract nonce. The ESP32 verifies the new nonce, writes it to flash before driving the pin, and holds the fan on for 60 seconds. Replays and lower nonces are refused.",
+    body: "Paying exactly 1 PAS increments the contract nonce. The ESP32 verifies the new nonce, writes it to flash before driving the pin, and holds the fan on for 60 seconds. Replays and lower nonces are refused. The first verified reading only sets a baseline, and a nonce that arrives while the fan is already on is consumed without extending the pulse. Several increments between two verification cycles do not guarantee several pulses. Live run: nonce 11 → 12, relay on for 60 s, no repeat on the next cycle.",
   },
 ];
 
 const FIRMWARE_FACTS = [
   { label: "Flash", value: "77.3% of 1.31 MB" },
-  { label: "Static RAM", value: "124 KB of 320 KB" },
-  { label: "Native tests", value: "10 of 10 passing" },
-  { label: "Contract", value: "0x0863…3374 on para 1000" },
+  { label: "Static RAM", value: "121 KiB of 320 KiB (38%)" },
+  { label: "Native tests", value: "10/10 suites, 481 checks passing (one run, Sept 2026)" },
+  { label: "Contract", value: "0x0863…3374 on para 1000 (testnet)" },
 ];
 
 const CANNOT_ACTUATE = [
@@ -100,9 +99,9 @@ const CANNOT_ACTUATE = [
 ];
 
 const APPROACHES = [
-  { name: "Share the data", compliance: "Proven", knowHow: "Exposed" },
-  { name: "Withhold the data", compliance: "Taken on trust", knowHow: "Kept" },
-  { name: "Zero-knowledge proof", compliance: "Proven", knowHow: "Stays on site" },
+  { name: "Share raw data", compliance: "Available for independent inspection", knowHow: "Exposed" },
+  { name: "Withhold raw data", compliance: "Producer's claim, taken on trust", knowHow: "Kept" },
+  { name: "Zero-knowledge proof", compliance: "Defined conditions over committed data", knowHow: "Protected, subject to metadata leakage" },
 ];
 
 const PRIVATE_INPUTS = [
@@ -121,19 +120,20 @@ const PUBLIC_OUTPUTS = [
 
 const PROOF_SHOWS = [
   "The committed trace satisfies the published predicate.",
-  "The trace is the one committed at production time, not a version edited afterwards.",
+  "The proof is bound to a specific on-chain commitment, preventing undetected substitution of the committed data. Authenticity and timing of physical measurements require additional controls.",
   "Which specification version it was checked against.",
 ];
 
 const PROOF_DOES_NOT_SHOW = [
   "That the sensor told the truth. A proof over fabricated readings is still a valid proof.",
-  "That the sensor was installed where the specification says it should be.",
+  "That the sensor was installed and calibrated as the specification requires.",
+  "That the product meets every applicable requirement beyond the stated predicate.",
   "Anything about batches that were never committed.",
 ];
 
 const HAVE_ALREADY = [
   "A device that verifies chain state on its own instead of trusting a server.",
-  "An on-chain anchor on Asset Hub that the device reads through proofs.",
+  "An on-chain value on Asset Hub (today, the trigger nonce) that the device reads through proofs.",
   "A signed path that carries telemetry off the shop floor.",
 ];
 
@@ -144,6 +144,8 @@ const STILL_MISSING = [
   "Where the prover runs. The gateway, not the microcontroller, is the realistic first host.",
   "Proof verification on PolkaVM, or off-chain verification by the auditor.",
   "Metadata leakage: how often proofs appear can still reveal throughput.",
+  "A hiding (salted) commitment: low-entropy sensor traces can otherwise be guessed from a plain hash.",
+  "Predicate leakage: a too narrow public predicate can itself reveal the process.",
 ];
 
 const ROADMAP: { status: Status; title: string; items: string[] }[] = [
@@ -165,7 +167,8 @@ const ROADMAP: { status: Status; title: string; items: string[] }[] = [
       "Readings signed by the ESP32 itself",
       "State proofs over P2P instead of public RPC",
       "Peer discovery and RPC failover",
-      "Measured stack and heap margins",
+      "Larger stack margins (currently ~1.8 KB minimum free)",
+      "Device pairing over NFC/BLE for an ESP32 identity",
     ],
   },
   {
@@ -229,30 +232,38 @@ function Overview() {
 
       <article className="doc">
         <div className="docTitle">
-          <h2>Infrastructure for industry</h2>
+          <h2>Verifiable infrastructure for industry: an engineering exploration</h2>
           <p className="byline">Project overview and research note</p>
         </div>
 
         <section className="abstract" aria-label="Abstract">
           <h3>Abstract</h3>
           <p>
-            Industrial is a shared layer for industrial systems that does not rely on trusted
-            central servers. It combines secure authentication, decentralized communication
-            through Celerity, actions that a device verifies cryptographically before carrying
-            them out, and tamper-evident command histories.
+            industrial.dot is an engineering exploration of a shared layer for industrial
+            systems that does not depend on a trusted control server. It combines identity and
+            signing through the Polkadot Products host, decentralized messaging through
+            Celerity, and physical actions that a device verifies cryptographically before
+            carrying them out.
           </p>
           <p>
-            A bench prototype built on an ESP32 and the Paseo network shows that telemetry and
-            paid actuation can run without a backend: the device checks chain finality and
-            state proofs itself, and only a proven on-chain payment can switch its relay. We
-            are also investigating how a manufacturer could prove that a product was made within
-            specification without revealing the process that made it, with applications in
-            industrial automation, quality assurance and digital product passports.
+            A bench prototype built on an ESP32 and the Paseo testnet (Asset Hub on the
+            Polkadot Products Devnet) shows that telemetry and paid actuation can run without a
+            backend of our own: the device checks chain finality and state proofs itself, and
+            only a proven increase of the contract nonce, which the contract allows only for a
+            1 PAS payment, can switch its relay. PAS is a testnet token with no monetary value.
+            We are also investigating how a manufacturer could prove that a product was made
+            within specification without revealing the process that made it, with applications
+            in industrial automation, quality assurance and digital product passports. This is
+            not a replacement for PLCs, safety interlocks or real-time control: one full
+            verification cycle takes about 20 seconds.
           </p>
         </section>
 
         <figure>
-          <figcaption>Table 1. Summary of results on the bench</figcaption>
+          <figcaption>
+            Table 1. Summary of results on the bench. Public RPC and P2P nodes and a desktop
+            gateway are used as untrusted infrastructure.
+          </figcaption>
           <table>
             <thead>
               <tr><th scope="col">Measure</th><th scope="col">Result</th></tr>
@@ -303,7 +314,10 @@ function Overview() {
           <FlowTable caption="Table 3. Control path" steps={CONTROL_FLOW} />
           <p>
             Celerity is used for observation only. The ESP32 firmware has no Celerity client and
-            no HTTP write route, so nothing published there can reach the relay.
+            no HTTP write route, so nothing published there can reach the relay. The desktop
+            gateway is not part of the actuator authorization path. However, it currently reads
+            and publishes telemetry, so the authenticity of sensor readings still depends on the
+            gateway. Device-origin signatures are planned but not implemented.
           </p>
         </section>
 
@@ -321,7 +335,9 @@ function Overview() {
             </div>
           ))}
           <figure>
-            <figcaption>Table 4. Firmware build</figcaption>
+            <figcaption>
+              Table 4. Firmware build. Development measurements; not an audit or certification.
+            </figcaption>
             <table>
               <tbody>
                 {FIRMWARE_FACTS.map((fact) => (
@@ -337,15 +353,27 @@ function Overview() {
 
         <section id="invariant" aria-labelledby="invariant-title">
           <SectionHeading id="invariant">Security invariant</SectionHeading>
-          <StatusLine status="tested" />
+          <StatusLine
+            status="tested"
+            label="tested on hardware and with negative fixtures; not formally verified"
+          />
           <p>
-            The pin moves only for a finalized, proven nonce higher than the one already stored.
+            The actuator transitions from OFF to ON only when the ESP32 accepts a finalized,
+            cryptographically verified contract nonce strictly higher than the persisted nonce,
+            provided a baseline has been established and no actuator pulse is already active.
             None of the following can move the relay; each can only supply bytes that the device
             verifies again, or be ignored:
           </p>
           <ul className="twoColList">
             {CANNOT_ACTUATE.map((item) => <li key={item}>{item}</li>)}
           </ul>
+          <p>
+            These external sources may delay or withhold data, but cannot cause an activation
+            without data that passes the device&apos;s proof verification. This depends on the
+            trusted firmware, the initial checkpoint and the correctness of the verification
+            implementation. The invariant assumes trusted firmware, a trusted initial checkpoint and no physical
+            access to the device.
+          </p>
         </section>
 
         <section id="privacy" aria-labelledby="privacy-title">
@@ -363,7 +391,7 @@ function Overview() {
             <figcaption>Table 5. Ways to answer an audit</figcaption>
             <table>
               <thead>
-                <tr><th scope="col">Approach</th><th scope="col">Compliance</th><th scope="col">Know-how</th></tr>
+                <tr><th scope="col">Approach</th><th scope="col">What is verified</th><th scope="col">Know-how</th></tr>
               </thead>
               <tbody>
                 {APPROACHES.map((row) => (
@@ -379,8 +407,8 @@ function Overview() {
 
           <h3>4.2 Proposed construction</h3>
           <p>
-            A prover running on the gateway would show that every committed reading in a time
-            window W satisfies a published predicate P. The auditor checks the proof against the
+            A prover running on the gateway would demonstrate that a committed process trace
+            satisfies a defined predicate P over a specified time window W. The auditor checks the proof against the
             commitment; the readings themselves never leave the site.
           </p>
           <div className="twoCol">
@@ -397,13 +425,14 @@ function Overview() {
           <h3>4.3 Example</h3>
           <p>The public statement, which anyone can read and check the proof against:</p>
           <blockquote>
-            &ldquo;Core temperature held at or above 72 °C for at least 15 s, for every unit in
-            batch 0417.&rdquo;
+            &ldquo;For batch 0417, the recorded process temperature remained at or above 72 °C for
+            at least 15 consecutive seconds (specification v1).&rdquo;
           </blockquote>
           <p>
-            What stays private is that the line actually runs at 74.5 °C, with a two-stage ramp
-            and an 18 s hold tuned for yield. That is the part a competitor would pay for, and
-            the proof reveals none of it.
+            What stays private (illustrative figures) is that the line actually runs at 74.5 °C, with a two-stage ramp
+            and an 18 s hold tuned for yield. That is the part a competitor would pay for. The
+            proof does not disclose the private temperature trace or ramp profile, although
+            public predicates and metadata may reveal limited information.
           </p>
 
           <h3>4.4 What a proof would and would not establish</h3>
